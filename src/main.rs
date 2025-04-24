@@ -18,7 +18,7 @@ use rig::{
     embeddings::embedding::EmbeddingModel, // Import the trait
     // Removed unused Embeddings, EmbeddingsBuilder
     // Removed unused vector_store imports (Point, PointData, VectorStoreIndex)
-    providers::{openrouter, openai}, // Import the openai provider module
+    providers::openai, // Import the openai provider module
 };
 // Removed unused import: use rig_qdrant::QdrantVectorStore;
 use serde::{Deserialize, Serialize};
@@ -112,8 +112,8 @@ async fn main() -> Result<()> {
 
     // --- OpenAI Client & Embedding Model ---
     // Use the standard OpenAI client from the rig crate
-    let openai_client = rig::providers::openai::Client::from_key(
-        args.openai_key, // Use the provided OpenAI key
+    let openai_client = rig::providers::openai::Client::new(
+        &args.openai_key, // Use the provided OpenAI key
     );
 
     let embedding_model: Arc<openai::EmbeddingModel> = Arc::new(
