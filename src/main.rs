@@ -1,18 +1,20 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use futures::stream::{self, StreamExt, TryStreamExt};
-use qdrant_client::client::QdrantClient;
+use futures::stream::{StreamExt, TryStreamExt}; // Removed unused `self` import
+use qdrant_client::QdrantClient; // Use non-deprecated client path
 use qdrant_client::qdrant::{
-    vectors_config::Config, CreateCollection, Distance, FieldType, PointStruct, VectorParams,
-    VectorsConfig, PointId, Condition, Filter, FieldCondition, Match, PayloadSelector, WithPayloadSelector, SearchPoints, OrderBy, PointIdVariant
+    point_id::PointIdOptions, // Correct path for PointIdVariant/Options
+    vectors_config::Config, CreateCollection, Distance, PointStruct, VectorParams,
+    VectorsConfig, PointId, PayloadSelector, WithPayloadSelector, SearchPoints, // Removed unused: FieldType, Condition, Filter, FieldCondition, Match, OrderBy
+    with_payload_selector, // Import the module for SelectorOptions::Include
 };
 use rig_core::{
     embeddings::{embedding::EmbeddingModel, Embeddings},
-    vector_store::{VectorStoreIndex, Point, PointData},
-    providers::openrouter::OpenRouterProvider, // Correct path for OpenRouter provider
+    vector_store::{VectorStoreIndex, Point, PointData}, // Keep VectorStoreIndex for rig trait usage if needed later
+    providers::openrouter::OpenRouterProvider,
 };
 // use rig_openrouter::OpenRouterProvider; // Removed incorrect use statement
-use rig_qdrant::QdrantVectorStoreIndex;
+use rig_qdrant::QdrantVectorStore; // Correct struct name
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -81,7 +83,8 @@ fn generate_uuid_from_path(path_str: &str) -> Uuid {
 // Helper to convert Uuid to Qdrant PointId
 fn uuid_to_point_id(uuid: Uuid) -> PointId {
     PointId {
-        point_id_options: Some(PointIdVariant::Uuid(uuid.to_string())),
+        // Use the correct enum path PointIdOptions
+        point_id_options: Some(PointIdOptions::Uuid(uuid.to_string())),
     }
 }
 
@@ -114,8 +117,8 @@ async fn main() -> Result<()> {
         args.openrouter_model, EMBEDDING_DIMENSION
     );
 
-    // Qdrant Client
-    let qdrant_client = Arc::new(QdrantClient::from_url(args.qdrant_url.as_str()).build()?);
+    // Qdrant Client (use non-deprecated path and builder)
+    let qdrant_client = Arc::new(QdrantClient::new(Some(args.qdrant_url.to_string()))?);
     info!("Connected to Qdrant at {}", args.qdrant_url);
 
     // Ensure Qdrant collection exists
@@ -197,10 +200,11 @@ async fn main() -> Result<()> {
             collection_name: QDRANT_COLLECTION_NAME.to_string(),
             vector: query_embedding.vector.into(),
             limit: 100, // Adjust as needed
-            with_payload: Some(WithPayloadSelector {
-                selector_options: Some(qdrant_client::qdrant::with_payload_selector::SelectorOptions::Enable(true)),
+            with_payload: Some(WithPayloadSelector { // Keep using Enable(true) to get all payload
+                selector_options: Some(with_payload_selector::SelectorOptions::Enable(true)),
             }),
             score_threshold: Some(args.cutoff), // Apply cutoff directly in Qdrant search
+            // No changes needed below for search_points as its signature seems stable enough
             ..Default::default()
         })
         .await
@@ -235,7 +239,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+// Update function signature to use non-deprecated client type
 async fn ensure_qdrant_collection(client: Arc<QdrantClient>) -> Result<()> {
+    // Use non-deprecated list_collections method
     let collections_list = client.list_collections().await?;
     if !collections_list
         .collections
@@ -243,6 +249,7 @@ async fn ensure_qdrant_collection(client: Arc<QdrantClient>) -> Result<()> {
         .any(|c| c.name == QDRANT_COLLECTION_NAME)
     {
         info!("Collection '{}' not found. Creating...", QDRANT_COLLECTION_NAME);
+        // Use non-deprecated create_collection method
         client
             .create_collection(&CreateCollection {
                 collection_name: QDRANT_COLLECTION_NAME.to_string(),
@@ -291,18 +298,21 @@ fn calculate_hash(file_path: &Path) -> Result<String> {
     Ok(hex::encode(hash_bytes))
 }
 
+// Update function signature to use non-deprecated client type
 async fn get_existing_hash(client: Arc<QdrantClient>, point_id: PointId) -> Result<Option<String>> {
+    // Use non-deprecated get_points method and provide all arguments
     let points = client
         .get_points(
-            QDRANT_COLLECTION_NAME,
-            &[point_id],
-            Some(WithPayloadSelector {
-                 selector_options: Some(qdrant_client::qdrant::with_payload_selector::SelectorOptions::Include(PayloadSelector{
+            QDRANT_COLLECTION_NAME, // collection_name
+            &[point_id],            // points selector
+            Some(WithPayloadSelector { // with_payload
+                 selector_options: Some(with_payload_selector::SelectorOptions::Include(PayloadSelector{
                     include_points: vec!["hash".to_string()], // Only fetch the hash
                  }))
             }),
-            None, // No vector needed
-            None,
+            None, // with_vectors
+            None, // read_consistency
+            None, // timeout - Added missing argument
         )
         .await?;
 
@@ -314,7 +324,7 @@ async fn get_existing_hash(client: Arc<QdrantClient>, point_id: PointId) -> Resu
     Ok(None)
 }
 
-
+// Update function signature to use non-deprecated client type
 async fn process_file(
     qdrant_client: Arc<QdrantClient>,
     embedding_model: Arc<dyn EmbeddingModel>,
@@ -374,12 +384,20 @@ async fn process_file(
     Ok(Some(point))
 }
 
+// Update function signature to use non-deprecated client type
 async fn upsert_batch(client: Arc<QdrantClient>, points: &[PointStruct]) -> Result<()> {
     if points.is_empty() {
         return Ok(());
     }
+    // Use non-deprecated upsert_points method
     client
-        .upsert_points_blocking(QDRANT_COLLECTION_NAME, None, points.to_vec(), None) // Use blocking for simplicity here, or batch async
+        .upsert_points(
+            QDRANT_COLLECTION_NAME, // collection_name
+            None,                   // wait
+            points.to_vec(),        // points
+            None,                   // ordering
+            None                    // timeout
+        )
         .await
         .context("Failed to upsert batch to Qdrant")?;
     Ok(())
