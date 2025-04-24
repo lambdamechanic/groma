@@ -126,10 +126,11 @@ async fn main() -> Result<()> {
     // Reverting to using the openai provider configured for OpenRouter seems more likely correct.
 
     // --- OpenAI Client (Configured for OpenRouter) & Embedding Model ---
-    let openai_client = rig::providers::openai::ClientBuilder::new()
-        .api_key(&args.openrouter_key)
-        .base_url("https://openrouter.ai/api/v1") // Set OpenRouter base URL
-        .build()?;
+    // Use openai::Client::from_url to set the base URL and key
+    let openai_client = rig::providers::openai::Client::from_url(
+        &args.openrouter_key,
+        "https://openrouter.ai/api/v1", // Set OpenRouter base URL
+    );
 
     let embedding_model: Arc<openai::EmbeddingModel> = Arc::new(
         openai_client
@@ -221,9 +222,10 @@ async fn main() -> Result<()> {
     // --- Search Qdrant ---
     info!("Searching for relevant files...");
     // Use the builder pattern for search_points
+    // Use the correct field name 'vec' for the embedding vector
     let search_result = qdrant_client
         .search_points(
-            SearchPointsBuilder::new(QDRANT_COLLECTION_NAME, query_embedding.vector.into(), 100) // collection, vector, limit
+            SearchPointsBuilder::new(QDRANT_COLLECTION_NAME, query_embedding.vec.into(), 100) // collection, vector, limit
                 .with_payload(true) // Request payload
                 .score_threshold(args.cutoff), // Apply cutoff
         )
@@ -396,8 +398,9 @@ where
 
     // Create Qdrant point
     // Convert Vec<f64> to Vec<f32> as Qdrant client expects f32
-    let vector_f32: Vec<f32> = embedding.vector.into_iter().map(|v| v as f32).collect();
-    // Use the correct field name 'vector' and explicitly convert Vec<f32> to qdrant::Vectors
+    // Use the correct field name 'vec' for the embedding vector
+    let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
+    // Explicitly convert Vec<f32> to qdrant::Vectors
     let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
     let point = PointStruct::new(point_id, vectors, payload);
 
