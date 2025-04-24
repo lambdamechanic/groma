@@ -22,7 +22,7 @@ use rig::{
 use serde::{Deserialize, Serialize};
 use git2::Repository; // Import Repository from git2
 use sha2::{Digest, Sha256};
-use futures::future::join_all; // Re-add join_all for file processing futures
+// Removed join_all import
 use std::{
     fs,
     io::{self, Read},
@@ -146,7 +146,8 @@ async fn main() -> Result<()> {
     ensure_qdrant_collection(qdrant_client.clone(), &collection_name).await?;
 
     // --- Process Files ---
-    // Text splitter will be created inside the async task for each file
+    // Create the text splitter once before the loop
+    let text_splitter = create_text_splitter().context("Failed to create text splitter")?;
     info!("Scanning folder: {}", args.folder.display());
     let files_to_scan = scan_folder(&args.folder)?;
     info!("Found {} tracked files to potentially process.", files_to_scan.len());
@@ -156,73 +157,44 @@ async fn main() -> Result<()> {
     let mut total_skipped_files = 0;
     let mut total_failed_files = 0;
 
-    // Create futures for processing each file in parallel
-    let file_processing_futures = files_to_scan
-        .into_iter()
-        .map(|file_path| {
-            // Clone necessary resources for the async task
-            let q_client = qdrant_client.clone();
-            let e_model = embedding_model.clone();
-            // text_splitter cannot be cloned, create it inside the task
-            let coll_name = collection_name.clone();
-            let path_str = file_path.to_string_lossy().to_string();
-            let path_str_clone = path_str.clone(); // Clone for error reporting
+    info!("Processing {} files sequentially...", files_to_scan.len());
 
-            // Create an async block (future) for processing this file
-            async move {
-                // Create the text splitter inside the task
-                let splitter = match create_text_splitter() {
-                    Ok(s) => s,
-                    Err(e) => return Err((path_str_clone, anyhow!("Failed to create text splitter: {}", e))),
-                };
+    // Process files sequentially
+    for file_path in files_to_scan {
+        let path_str = file_path.to_string_lossy().to_string();
+        let path_str_clone = path_str.clone(); // Clone for error reporting
 
-                match process_file(
-                    q_client,
-                    e_model,
-                    &splitter, // Pass the newly created splitter reference
-                    &file_path,
-                    &path_str,
-                    &coll_name,
-                )
-                .await
-                {
-                    // Return path along with points or error
-                    Ok(points) => Ok((path_str, points)),
-                    Err(e) => Err((path_str_clone, e)),
-                }
-            }
-        })
-        .collect::<Vec<_>>();
-
-    info!("Processing {} files concurrently...", file_processing_futures.len());
-
-    // Execute all file processing futures concurrently
-    let processing_results = join_all(file_processing_futures).await;
-
-    // Process results after all futures have completed
-    for result in processing_results {
-        match result {
-            Ok((path, new_points)) => {
+        match process_file(
+            qdrant_client.clone(),
+            embedding_model.clone(),
+            &text_splitter, // Pass the pre-created splitter reference
+            &file_path,
+            &path_str,
+            &collection_name,
+        )
+        .await
+        {
+            Ok(new_points) => {
                 if new_points.is_empty() {
                     // File was skipped (up-to-date or empty)
-                    debug!("File skipped (up-to-date or empty): {}", path);
+                    debug!("File skipped (up-to-date or empty): {}", path_str);
                     total_skipped_files += 1;
                 } else {
                     // File was processed, add its points to the main list
-                    debug!("Successfully processed file: {}", path);
+                    debug!("Successfully processed file: {}", path_str);
                     total_processed_files += 1;
                     all_points_to_upsert.extend(new_points);
                 }
             }
-            Err((path, e)) => {
-                warn!("Failed to process file {}: {}", path, e);
+            Err(e) => {
+                warn!("Failed to process file {}: {}", path_str_clone, e);
                 total_failed_files += 1;
             }
         }
     }
 
     info!(
-        "File processing phase complete. Processed: {}, Skipped (up-to-date/empty): {}, Failed: {}",
+        "File processing complete. Processed: {}, Skipped (up-to-date/empty): {}, Failed: {}",
         total_processed_files, total_skipped_files, total_failed_files
     );
 
