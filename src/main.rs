@@ -9,8 +9,9 @@ use qdrant_client::qdrant::{
 use rig_core::{
     embeddings::{embedding::EmbeddingModel, Embeddings},
     vector_store::{VectorStoreIndex, Point, PointData},
+    providers::openrouter::OpenRouterProvider, // Correct path for OpenRouter provider
 };
-use rig_openrouter::OpenRouterProvider;
+// use rig_openrouter::OpenRouterProvider; // Removed incorrect use statement
 use rig_qdrant::QdrantVectorStoreIndex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -101,6 +102,7 @@ async fn main() -> Result<()> {
     info!("Initializing clients...");
 
     // OpenRouter Client & Embedding Model
+    // Use the correct path from rig_core::providers::openrouter
     let openrouter_provider = OpenRouterProvider::new(args.openrouter_key.clone());
     let embedding_model = Arc::new(
         openrouter_provider

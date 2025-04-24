@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 rig-core = "0.11"
-rig-openrouter = "0.11" # Check for the latest compatible version
+# rig-openrouter = "0.11" # Removed - OpenRouter is part of rig-core
 rig-qdrant = "0.1"     # Check for the latest compatible version
 qdrant-client = "1.8"  # Check for the latest compatible version with rig-qdrant
 clap = { version = "4.4", features = ["derive"] }
