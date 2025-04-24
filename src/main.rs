@@ -165,17 +165,23 @@ async fn main() -> Result<()> {
             // Clone necessary resources for the async task
             let q_client = qdrant_client.clone();
             let e_model = embedding_model.clone();
-            let splitter = text_splitter.clone(); // TextSplitter implements Clone
+            // text_splitter cannot be cloned, create it inside the task
             let coll_name = collection_name.clone();
             let path_str = file_path.to_string_lossy().to_string();
             let path_str_clone = path_str.clone(); // Clone for error reporting
 
             // Create an async block (future) for processing this file
             async move {
+                // Create the text splitter inside the task
+                let splitter = match create_text_splitter() {
+                    Ok(s) => s,
+                    Err(e) => return Err((path_str_clone, anyhow!("Failed to create text splitter: {}", e))),
+                };
+
                 match process_file(
                     q_client,
                     e_model,
-                    &splitter, // Pass the cloned splitter reference
+                    &splitter, // Pass the newly created splitter reference
                     &file_path,
                     &path_str,
                     &coll_name,
