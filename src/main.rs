@@ -80,6 +80,10 @@ struct Args {
     /// Suppress checking for file updates and upserting to Qdrant
     #[arg(long)]
     suppress_updates: bool,
+
+    /// Enable debug logging
+    #[arg(long)]
+    debug: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -149,16 +153,19 @@ fn uuid_to_point_id(uuid: Uuid) -> PointId {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Parse CLI arguments *first* to determine log level
+    let args = Args::parse();
+
     // Initialize tracing subscriber for logging to stderr
+    let log_level = if args.debug { Level::DEBUG } else { Level::INFO };
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO) // Adjust level as needed (e.g., DEBUG for more details)
+        .with_max_level(log_level) // Set level based on --debug flag
         .with_writer(std::io::stderr) // Configure the writer to use stderr
         .finish();
     tracing::subscriber::set_global_default(subscriber)
         .expect("setting default subscriber failed");
 
-    // Parse CLI arguments
-    let args = Args::parse();
+    // Args already parsed above
 
     // Canonicalize the input folder path early for relative path calculations later
     let canonical_folder_path = fs::canonicalize(&args.folder)
