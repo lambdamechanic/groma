@@ -3,13 +3,13 @@ use clap::Parser;
 use futures::stream::{StreamExt, TryStreamExt};
 // Use the new Qdrant client struct and builder patterns
 use qdrant_client::{
-    payload::Payload, // Import Payload struct directly
+    Payload, // Import Payload struct directly from crate root
     qdrant::{
-        point_id::PointIdOptions, vectors_config::Config, CreateCollectionBuilder, Distance,
-        GetPointsBuilder, PointStruct, QueryPointsBuilder, SearchPointsBuilder, VectorParams,
+        point_id::PointIdOptions, CreateCollectionBuilder, Distance,
+        GetPointsBuilder, PointStruct, SearchPointsBuilder, VectorParams,
         VectorsConfig, PointId, WithPayloadSelector, with_payload_selector, // Keep for SelectorOptions::Include
         UpsertPointsBuilder, // Import UpsertPointsBuilder
-        PayloadSelector, // Import PayloadSelector directly
+        PayloadIncludeSelector, // Import PayloadIncludeSelector
     },
     Qdrant, // Use the new Qdrant struct
 };
@@ -18,7 +18,7 @@ use rig_core::{
     vector_store::{VectorStoreIndex, Point, PointData},
     providers::openrouter::OpenRouterProvider,
 };
-use rig_qdrant::QdrantVectorStore; // Re-add QdrantVectorStore import
+// Removed unused import: use rig_qdrant::QdrantVectorStore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -298,12 +298,9 @@ fn calculate_hash(file_path: &Path) -> Result<String> {
 async fn get_existing_hash(client: Arc<Qdrant>, point_id: PointId) -> Result<Option<String>> {
     // Use new get_points method with builder
     let get_points_req = GetPointsBuilder::new(QDRANT_COLLECTION_NAME, vec![point_id])
-        .with_payload(WithPayloadSelector { // Request only the 'hash' field
-            selector_options: Some(with_payload_selector::SelectorOptions::Include(
-                PayloadSelector {
-                    include_points: vec!["hash".to_string()],
-                },
-            )),
+        // Use PayloadIncludeSelector directly for with_payload
+        .with_payload(PayloadIncludeSelector {
+            include: vec!["hash".to_string()],
         })
         .with_vectors(false); // Don't need vectors for this check
 
@@ -311,10 +308,10 @@ async fn get_existing_hash(client: Arc<Qdrant>, point_id: PointId) -> Result<Opt
 
     // Process the response which is now Vec<RetrievedPoint>
     if let Some(point) = points_response.result.into_iter().next() {
-        // Payload is now Option<Payload>
-        if let Some(payload) = point.payload {
-            if let Some(hash_value) = payload.inner().get("hash") {
-                // Access the inner map
+        // Payload is Option<Payload>
+        if let Some(payload_struct) = point.payload { // Use a different variable name for clarity
+            // Access the inner map using inner() which returns &HashMap
+            if let Some(hash_value) = payload_struct.inner().get("hash") {
                 return Ok(hash_value.as_str().map(String::from));
             }
         }
