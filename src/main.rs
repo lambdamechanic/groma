@@ -108,6 +108,12 @@ async fn main() -> Result<()> {
     // Parse CLI arguments
     let args = Args::parse();
 
+    // Canonicalize the input folder path early for relative path calculations later
+    let canonical_folder_path = fs::canonicalize(&args.folder)
+        .with_context(|| format!("Failed to canonicalize input folder path: {}", args.folder.display()))?;
+    info!("Using canonical folder path: {}", canonical_folder_path.display());
+
+
     // --- Initialize Clients ---
     info!("Initializing clients...");
 
@@ -255,11 +261,12 @@ async fn main() -> Result<()> {
 
     for hit in search_result.result {
         if let Some(path_val) = hit.payload.get("path") {
-            if let Some(path_str) = path_val.as_str() {
+            // The path stored in Qdrant is absolute/canonical
+            if let Some(absolute_path_str) = path_val.as_str() {
                 let score = hit.score;
-                // Insert or update the score, keeping the highest one
+                // Insert or update the score, keeping the highest one for the absolute path
                 file_scores
-                    .entry(path_str.to_string())
+                    .entry(absolute_path_str.to_string())
                     .and_modify(|e| *e = e.max(score))
                     .or_insert(score);
             }
@@ -267,10 +274,30 @@ async fn main() -> Result<()> {
     }
 
     // --- Format and Print Aggregated Results as JSON ---
-    // Convert the HashMap into a Vec of (score, path) tuples
+    // Convert the HashMap into a Vec of (score, relative_path) tuples
     let mut aggregated_results: Vec<(f32, String)> = file_scores
         .into_iter()
-        .map(|(path, score)| (score, path)) // Create tuples (score, path)
+        .filter_map(|(absolute_path_str, score)| {
+            // Convert absolute path string back to PathBuf
+            let absolute_path = PathBuf::from(&absolute_path_str);
+            // Attempt to strip the canonical folder prefix
+            match absolute_path.strip_prefix(&canonical_folder_path) {
+                Ok(relative_path) => {
+                    // Convert the relative path to a string for JSON output
+                    Some((score, relative_path.to_string_lossy().to_string()))
+                }
+                Err(e) => {
+                    // This might happen if a path somehow doesn't start with the folder path, log it.
+                    warn!(
+                        "Failed to strip prefix '{}' from path '{}': {}. Skipping this result.",
+                        canonical_folder_path.display(),
+                        absolute_path_str,
+                        e
+                    );
+                    None // Exclude this result from the output
+                }
+            }
+        })
         .collect();
 
     // Sort by score descending
