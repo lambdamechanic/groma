@@ -297,6 +297,26 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+// Helper function to generate a Qdrant collection name from a folder path
+fn generate_collection_name(folder_path: &Path) -> Result<String> {
+    let canonical_path = fs::canonicalize(folder_path)
+        .with_context(|| format!("Failed to canonicalize folder path: {}", folder_path.display()))?;
+    let path_str = canonical_path.to_string_lossy();
+
+    // Use SHA256 for hashing the canonical path
+    let mut hasher = Sha256::new();
+    hasher.update(path_str.as_bytes());
+    let hash_bytes = hasher.finalize();
+    let hash_hex = hex::encode(hash_bytes);
+
+    // Use the first 16 chars of the hex hash for brevity, prefixed
+    // Qdrant names must match ^[a-zA-Z0-9_-]{1,255}$
+    let collection_name = format!("groma-{}", &hash_hex[..16]);
+
+    Ok(collection_name)
+}
+
+
 // Helper function to create a text splitter configured for token-based chunking
 // Update the return type to use the concrete CoreBPE tokenizer type
 fn create_text_splitter() -> Result<TextSplitter<CoreBPE>> {
