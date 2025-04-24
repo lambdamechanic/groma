@@ -51,7 +51,7 @@ use uuid::Uuid;
 // Example: text-embedding-3-small is 1536, text-embedding-ada-002 is 1536
 // Let's make it configurable or fetch dynamically if possible, but start with a common default.
 const EMBEDDING_DIMENSION: u64 = 1536;
-const BATCH_SIZE: usize = 32; // For batch embedding generation
+// Removed unused BATCH_SIZE constant
 const QDRANT_UPSERT_BATCH_SIZE: usize = 100; // For batch upserting to Qdrant
 
 #[derive(Parser, Debug)]
@@ -201,14 +201,16 @@ async fn main() -> Result<()> {
     let text_splitter = create_text_splitter().context("Failed to create text splitter")?;
 
     let mut documents_to_embed: Vec<LongDocument> = Vec::new();
-    let mut total_processed_files = 0; // Renamed back - it is used now
-    let mut total_skipped_files = 0;
-    let mut total_failed_files = 0;
-    let mut files_requiring_processing = 0;
-    let mut all_points_to_upsert: Vec<PointStruct> = Vec::new();
+    // Removed unused outer declaration of all_points_to_upsert
 
     if !args.suppress_updates {
         info!("Checking for file updates and processing changes...");
+
+        // Initialize counters inside the conditional block where they are used
+        let mut total_processed_files = 0;
+        let mut total_skipped_files = 0;
+        let mut total_failed_files = 0;
+        let mut files_requiring_processing = 0;
 
         let files_to_scan = scan_folder(&args.folder)?;
         info!("Found {} tracked files to potentially process.", files_to_scan.len());
