@@ -624,23 +624,9 @@ where
                  },
                  Err(e) => {
                      error!("Failed to serialize metadata for chunk {} of {}: {}", chunk_index, path_str, e);
-                    path: path_str.to_string(),
-                    hash: current_hash.clone(), // Use the hash of the whole file
-                    chunk_index,
-                };
-                let payload: Payload = match serde_json::to_value(metadata) {
-                    Ok(val) => match val.try_into() {
-                        Ok(p) => p,
-                        Err(e) => {
-                            error!("Failed to convert metadata to Qdrant Payload for chunk {} of {}: {}", chunk_index, path_str, e);
-                            continue; // Skip this chunk
-                        }
-                    },
-                    Err(e) => {
-                        error!("Failed to serialize metadata for chunk {} of {}: {}", chunk_index, path_str, e);
-                        continue; // Skip this chunk
-                    }
-                };
+                     continue; // Skip this chunk
+                 }
+             };
 
                 let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
                 let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
