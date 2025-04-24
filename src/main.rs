@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-// Removed unused futures imports
 // Use the new Qdrant client struct and builder patterns
 use qdrant_client::{
     Payload, // Import Payload struct directly from crate root
@@ -14,8 +13,8 @@ use qdrant_client::{
 };
 // Use the main `rig` crate
 use rig::{
-    embeddings::embedding::EmbeddingModel, // Import the trait
-    // Removed unused Embeddings, EmbeddingsBuilder
+    embeddings::{embedding::EmbeddingModel, EmbeddingsBuilder}, // Import the trait and builder
+    // Removed unused Embeddings
     // Removed unused vector_store imports (Point, PointData, VectorStoreIndex)
     providers::openai, // Import the openai provider module
 };
@@ -23,7 +22,7 @@ use rig::{
 use serde::{Deserialize, Serialize};
 use git2::Repository; // Import Repository from git2
 use sha2::{Digest, Sha256};
-use futures::future::join_all; // Import join_all for concurrent futures
+// Removed join_all import as EmbeddingsBuilder handles concurrency
 use std::{
     fs,
     io::{self, Read},
@@ -578,53 +577,39 @@ where
     // Chunk the content using the text splitter's token-based chunks method
     // Pass the desired chunk size (in tokens) here.
     const TARGET_CHUNK_SIZE_TOKENS: usize = 512;
-    let chunks: Vec<&str> = text_splitter.chunks(&content, TARGET_CHUNK_SIZE_TOKENS).collect(); // Use .chunks() and pass size
+    const TARGET_CHUNK_SIZE_TOKENS: usize = 512;
+    let chunks: Vec<&str> = text_splitter.chunks(&content, TARGET_CHUNK_SIZE_TOKENS).collect();
     info!("Split '{}' into {} chunks (target size: {} tokens).", path_str, chunks.len(), TARGET_CHUNK_SIZE_TOKENS);
 
-    let mut points_to_upsert = Vec::with_capacity(chunks.len());
+    if chunks.is_empty() {
+        warn!("No text chunks generated for file: {}", path_str);
+        return Ok(Vec::new());
+    }
 
-    // Create futures for embedding each batch in parallel
-    let embedding_futures = chunks
-        .chunks(BATCH_SIZE) // Use BATCH_SIZE defined earlier
-        .enumerate()
-        .map(|(batch_index, text_batch)| {
-            // Clone Arcs and necessary data for the async block
-            let model = embedding_model.clone();
-            let path_str_clone = path_str.to_string(); // Clone path string for logging/error context
-            // Convert Vec<&str> to Vec<String> for embed_texts
-            let text_batch_strings: Vec<String> = text_batch.iter().map(|&s| s.to_string()).collect();
+    // Convert chunks to Strings for the EmbeddingsBuilder
+    let chunk_strings: Vec<String> = chunks.iter().map(|&s| s.to_string()).collect();
 
-            // Create an async block (future) for embedding this batch
-            async move {
-                debug!("Starting embedding for batch {} of file {}", batch_index, path_str_clone);
-                match model.embed_texts(text_batch_strings).await {
-                    Ok(embeddings) => {
-                        debug!("Finished embedding for batch {} of file {}", batch_index, path_str_clone);
-                        Ok((batch_index, embeddings)) // Return batch index along with embeddings
-                    }
-                    Err(e) => {
-                        error!("Failed to embed batch {} for file {}: {}", batch_index, path_str_clone, e);
-                        Err(e) // Propagate the error
-                    }
-                }
-            }
-        })
-        .collect::<Vec<_>>();
+    // Use EmbeddingsBuilder for batching and parallelism
+    debug!("Generating embeddings for {} chunks using EmbeddingsBuilder...", chunk_strings.len());
+    let embedding_results = EmbeddingsBuilder::new(embedding_model.clone())
+        .documents(chunk_strings)? // Pass owned Strings
+        .build()
+        .await
+        .context("Failed to generate embeddings using EmbeddingsBuilder")?;
 
-    // Execute all embedding futures concurrently
-    let embedding_results = join_all(embedding_futures).await;
+    info!("Successfully generated embeddings for {} chunks.", embedding_results.len());
 
-    // Process results and create points
-    for result in embedding_results {
-        match result {
-            Ok((batch_index, embeddings)) => {
-                // Create points for the successful batch
-                for (i, embedding) in embeddings.into_iter().enumerate() {
-                    let chunk_index = batch_index * BATCH_SIZE + i; // Calculate overall chunk index
-                    let chunk_uuid = generate_uuid_for_chunk(path_str, chunk_index);
-                    let point_id = uuid_to_point_id(chunk_uuid);
+    let mut points_to_upsert = Vec::with_capacity(embedding_results.len());
 
-                    let metadata = FileMetadata {
+    // Process results from EmbeddingsBuilder
+    for (chunk_index, (_original_text, embedding_result)) in embedding_results.into_iter().enumerate() {
+        // Assuming OneOrMany::One for simplicity, handle Many if needed
+        match embedding_result {
+            rig::embeddings::OneOrMany::One(embedding) => {
+                let chunk_uuid = generate_uuid_for_chunk(path_str, chunk_index);
+                let point_id = uuid_to_point_id(chunk_uuid);
+
+                let metadata = FileMetadata {
                 path: path_str.to_string(),
                 hash: current_hash.clone(), // Use the hash of the whole file
                 chunk_index,
@@ -639,24 +624,43 @@ where
                  },
                  Err(e) => {
                      error!("Failed to serialize metadata for chunk {} of {}: {}", chunk_index, path_str, e);
-                     continue; // Skip this chunk
-                 }
-             };
+                    path: path_str.to_string(),
+                    hash: current_hash.clone(), // Use the hash of the whole file
+                    chunk_index,
+                };
+                let payload: Payload = match serde_json::to_value(metadata) {
+                    Ok(val) => match val.try_into() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            error!("Failed to convert metadata to Qdrant Payload for chunk {} of {}: {}", chunk_index, path_str, e);
+                            continue; // Skip this chunk
+                        }
+                    },
+                    Err(e) => {
+                        error!("Failed to serialize metadata for chunk {} of {}: {}", chunk_index, path_str, e);
+                        continue; // Skip this chunk
+                    }
+                };
 
-
-            let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
-            let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
-            let point = PointStruct::new(point_id, vectors, payload);
-            points_to_upsert.push(point);
-                }
+                let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
+                let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
+                let point = PointStruct::new(point_id, vectors, payload);
+                points_to_upsert.push(point);
             }
-            Err(_) => {
-                // Error already logged inside the future, just continue
-                continue;
+            rig::embeddings::OneOrMany::Many(embeddings) => {
+                 // This case might occur if the model returns multiple embeddings per document.
+                 // Decide how to handle this - perhaps create multiple points or log a warning.
+                 warn!("Received multiple embeddings for chunk {} of file {}. Skipping.", chunk_index, path_str);
+                 // Example: Create a point for the first embedding if desired
+                 /*
+                 if let Some(embedding) = embeddings.into_iter().next() {
+                     // ... create point logic as above ...
+                 }
+                 */
+                 continue;
             }
         }
-    } // <-- Add missing closing brace for the `for result in embedding_results` loop
-
+    }
 
     Ok(points_to_upsert)
 }
