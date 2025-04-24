@@ -7,7 +7,7 @@ use qdrant_client::{
     qdrant::{
         point_id::PointIdOptions, CreateCollectionBuilder, Distance,
         GetPointsBuilder, PointStruct, SearchPointsBuilder, VectorParams,
-        VectorsConfig, PointId, WithPayloadSelector, with_payload_selector, // Keep for SelectorOptions::Include
+        VectorsConfig, PointId, // Removed WithPayloadSelector, with_payload_selector
         UpsertPointsBuilder, // Import UpsertPointsBuilder
         PayloadIncludeSelector, // Import PayloadIncludeSelector
     },
@@ -298,9 +298,9 @@ fn calculate_hash(file_path: &Path) -> Result<String> {
 async fn get_existing_hash(client: Arc<Qdrant>, point_id: PointId) -> Result<Option<String>> {
     // Use new get_points method with builder
     let get_points_req = GetPointsBuilder::new(QDRANT_COLLECTION_NAME, vec![point_id])
-        // Use PayloadIncludeSelector directly for with_payload
+        // Use PayloadIncludeSelector directly for with_payload, using the correct field name 'fields'
         .with_payload(PayloadIncludeSelector {
-            include: vec!["hash".to_string()],
+            fields: vec!["hash".to_string()],
         })
         .with_vectors(false); // Don't need vectors for this check
 
