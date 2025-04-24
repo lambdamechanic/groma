@@ -54,13 +54,13 @@ struct Args {
     #[arg(short, long)]
     cutoff: f32,
 
-    /// OpenRouter API Key
-    #[arg(long, env = "OPENROUTER_API_KEY")]
-    openrouter_key: String,
+    /// OpenAI API Key
+    #[arg(long, env = "OPENAI_API_KEY")]
+    openai_key: String,
 
-    /// OpenRouter Embedding Model name (e.g., "openai/text-embedding-ada-002")
-    #[arg(long, default_value = "openai/text-embedding-ada-002")]
-    openrouter_model: String,
+    /// OpenAI Embedding Model name (e.g., "text-embedding-3-small")
+    #[arg(long, default_value = "text-embedding-3-small")]
+    openai_model: String,
 
     /// Qdrant server URL
     #[arg(long, env = "QDRANT_URL", default_value = "http://localhost:6333")]
@@ -110,36 +110,19 @@ async fn main() -> Result<()> {
     // --- Initialize Clients ---
     info!("Initializing clients...");
 
-    // --- OpenRouter Client & Embedding Model ---
-    // Use the OpenRouter client directly, setting the API key and base URL.
-    let openrouter_client = openrouter::Client::from_url(
-        &args.openrouter_key,
-        "https://openrouter.ai/api/v1", // Set OpenRouter base URL
-    );
-
-    // Get the concrete embedding model type from the OpenRouter client.
-    // The type is openai::EmbeddingModel, obtained via the OpenRouter client.
-    // Note: OpenRouter client in rig currently doesn't directly provide embedding models.
-    // We might need to use the OpenAI provider configured for OpenRouter.
-    // Let's assume for now the OpenRouter client *can* vend an OpenAI-compatible model interface.
-    // If not, we'll need to adjust how the embedding model is obtained.
-    // Reverting to using the openai provider configured for OpenRouter seems more likely correct.
-
-    // --- OpenAI Client (Configured for OpenRouter) & Embedding Model ---
-    // Use openai::Client::from_url to set the base URL and key
-    let openai_client = rig::providers::openai::Client::from_url(
-        &args.openrouter_key,
-        "https://openrouter.ai/api/v1", // Set OpenRouter base URL
+    // --- OpenAI Client & Embedding Model ---
+    // Use the standard OpenAI client from the rig crate
+    let openai_client = rig::providers::openai::Client::from_key(
+        args.openai_key, // Use the provided OpenAI key
     );
 
     let embedding_model: Arc<openai::EmbeddingModel> = Arc::new(
         openai_client
-            .embedding_model(&args.openrouter_model) // Use the model name specified
-        // This method returns the model directly, not a future
+            .embedding_model(&args.openai_model) // Use the specified OpenAI model name
     );
     info!(
-        "Using Embedding model via OpenRouter: {} (Dimension: {})", // Note: EMBEDDING_DIMENSION might need adjustment based on the actual model
-        args.openrouter_model, EMBEDDING_DIMENSION
+        "Using OpenAI Embedding model: {} (Dimension: {})", // Note: EMBEDDING_DIMENSION might need adjustment based on the actual model
+        args.openai_model, EMBEDDING_DIMENSION
     );
 
     // Qdrant Client (use new Qdrant struct and builder)
