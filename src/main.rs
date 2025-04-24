@@ -157,9 +157,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Initialize tracing subscriber using EnvFilter
-    // Default level is INFO, or DEBUG if --debug is passed.
+    // Default level is OFF, unless --debug is passed (then DEBUG).
     // RUST_LOG environment variable overrides the default.
-    let default_level = if args.debug { "debug" } else { "info" };
+    let default_level = if args.debug { "debug" } else { "off" }; // Default to "off" if --debug is not set
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(default_level));
 
