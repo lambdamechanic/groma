@@ -33,8 +33,8 @@ use tabled::{Table, Tabled};
 use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use url::Url;
-// Import TextSplitter (ChunkConfig is handled internally by the builder pattern)
-use text_splitter::TextSplitter;
+// Import TextSplitter
+use text_splitter::TextSplitter; // Removed note about ChunkConfig
 // Import the specific tokenizer type needed for TextSplitter signature
 use tiktoken_rs::{cl100k_base, CoreBPE};
 use uuid::Uuid;
@@ -287,16 +287,13 @@ async fn main() -> Result<()> {
 // Update the return type to use the concrete CoreBPE tokenizer type
 fn create_text_splitter() -> Result<TextSplitter<CoreBPE>> {
     let tokenizer = cl100k_base().context("Failed to load cl100k_base tokenizer")?;
-    // Aim for chunks of ~512 tokens, with some overlap. Max size 8191 for safety.
-    let chunk_config = ChunkConfig::new(512)
-        .with_overlap(50)
-        // Max chunk size is measured in whatever the splitter uses (tokens here)
-        // .with_max_chunk_size_chars(8191 * 4) // This is less relevant when using token splitter
-        .with_trim(true); // Trim whitespace
-
-    // Use the correct constructor pattern: new(tokenizer).with_config(config)
-    Ok(TextSplitter::new(tokenizer).with_config(chunk_config))
+    // Configure the splitter directly. Chunk size is passed to .chunks() later.
+    // Overlap is handled implicitly by the splitter algorithm aiming for the target size.
+    Ok(TextSplitter::new(tokenizer)
+        .with_trim(true)) // Configure trimming directly
 }
+// Note: Chunk size (e.g., 512) and overlap (e.g., 50) are now handled
+// differently. Size is passed to .chunks(), overlap is less explicit.
 
 
 // Update function signature to use new Qdrant client type
@@ -425,14 +422,11 @@ async fn delete_points_by_path(client: Arc<Qdrant>, path_str: &str) -> Result<()
         MatchValue::Keyword(path_str.to_string()), // Use MatchValue::Keyword (capital K)
     )]);
 
-    // Select points based on the filter using the correct enum variant syntax
-    let points_selector = PointsSelector::Filter(filter.into()); // Correct enum variant usage
-
-    // Use DeletePointsBuilder correctly: new takes name, selector is set via .selector() method
+    // Use DeletePointsBuilder with the filter directly
     client
         .delete_points(
             DeletePointsBuilder::new(QDRANT_COLLECTION_NAME)
-                .selector(points_selector) // Use .selector() method
+                .filter(filter) // Apply the filter directly
             // .wait(true) // Optionally wait
         )
         .await?;
@@ -480,9 +474,11 @@ where
         return Ok(Vec::new());
     }
 
-    // Chunk the content using the text splitter's token-based split method
-    let chunks: Vec<&str> = text_splitter.split(&content).collect(); // Use .split() instead of .chunks()
-    info!("Split '{}' into {} chunks.", path_str, chunks.len());
+    // Chunk the content using the text splitter's token-based chunks method
+    // Pass the desired chunk size (in tokens) here.
+    const TARGET_CHUNK_SIZE_TOKENS: usize = 512;
+    let chunks: Vec<&str> = text_splitter.chunks(&content, TARGET_CHUNK_SIZE_TOKENS).collect(); // Use .chunks() and pass size
+    info!("Split '{}' into {} chunks (target size: {} tokens).", path_str, chunks.len(), TARGET_CHUNK_SIZE_TOKENS);
 
     let mut points_to_upsert = Vec::with_capacity(chunks.len());
 
