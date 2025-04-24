@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use text_splitter::TextSplitter;
 use tiktoken_rs::{cl100k_base, CoreBPE};
-use tracing::{debug, error, info, warn, Level};
+use tracing::{debug, error, info, warn}; // Removed Level
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use url::Url;
 use uuid::Uuid;
@@ -120,13 +120,13 @@ impl<'a> Embed for LongDocument<'a> {
             .text_splitter
             .chunks(&self.content, TARGET_CHUNK_SIZE_TOKENS);
 
-        let mut chunk_count = 0;
+        // Removed unused chunk_count variable
         // Add each chunk's text to the embedder
         for chunk in chunks {
             if !chunk.trim().is_empty() {
                 embedder.embed(chunk.to_string()); // Pass ownership of the string chunk
-                chunk_count += 1;
-            } // <-- Added missing closing brace and removed duplicated block
+                // Removed chunk_count increment
+            }
         }
         // It's okay if a document yields no chunks (e.g., only whitespace).
         // The calling code handles skipping empty files before creating LongDocument.
