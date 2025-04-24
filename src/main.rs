@@ -607,8 +607,8 @@ where
     for (chunk_index, (_original_text, embedding_result)) in embedding_results.into_iter().enumerate() {
         // Assuming OneOrMany::One for simplicity, handle Many if needed
         match embedding_result {
-            // Use the imported OneOrMany directly
-            OneOrMany::One(embedding) => {
+            // Use the fully qualified path for the enum variants
+            rig::OneOrMany::One(embedding) => {
                 let chunk_uuid = generate_uuid_for_chunk(path_str, chunk_index);
                 let point_id = uuid_to_point_id(chunk_uuid);
 
@@ -636,8 +636,8 @@ where
                 let point = PointStruct::new(point_id, vectors, payload);
                 points_to_upsert.push(point);
             }
-            // Use the imported OneOrMany directly
-            OneOrMany::Many(embeddings) => {
+            // Use the fully qualified path for the enum variants
+            rig::OneOrMany::Many(embeddings) => {
                  // This case might occur if the model returns multiple embeddings per document.
                  // Decide how to handle this - perhaps create multiple points or log a warning.
                  warn!("Received multiple embeddings for chunk {} of file {}. Skipping.", chunk_index, path_str);
