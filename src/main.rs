@@ -207,7 +207,6 @@ async fn main() -> Result<()> {
         info!("Checking for file updates and processing changes...");
 
         // Initialize counters inside the conditional block where they are used
-        let mut total_processed_files = 0;
         let mut total_skipped_files = 0;
         let mut total_failed_files = 0;
         let mut files_requiring_processing = 0;
@@ -263,7 +262,6 @@ async fn main() -> Result<()> {
         }.await {
             Ok(processed) => {
                 if processed {
-                    total_processed_files += 1;
                 } else {
                     total_skipped_files += 1;
                 }
