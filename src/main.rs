@@ -18,7 +18,7 @@ use rig::{
     embeddings::embedding::EmbeddingModel, // Import the trait
     // Removed unused Embeddings, EmbeddingsBuilder
     // Removed unused vector_store imports (Point, PointData, VectorStoreIndex)
-    providers::openrouter::{EmbeddingModel as OpenRouterEmbeddingModel, OpenRouterProvider}, // Import provider and its specific model struct
+    providers::openrouter, // Import the openrouter provider module
 };
 // Removed unused import: use rig_qdrant::QdrantVectorStore;
 use serde::{Deserialize, Serialize};
@@ -111,10 +111,13 @@ async fn main() -> Result<()> {
     info!("Initializing clients...");
 
     // OpenRouter Client & Embedding Model
-    let openrouter_provider = OpenRouterProvider::new(args.openrouter_key.clone());
-    // Explicitly type the Arc with the concrete model type from the provider
-    let embedding_model: Arc<OpenRouterEmbeddingModel> = Arc::new(
-        openrouter_provider
+    // Use the Client struct from the openrouter module
+    let openrouter_client = openrouter::Client::new(&args.openrouter_key);
+    // Get the embedding model using the client.
+    // We can use `Arc<dyn EmbeddingModel + Send + Sync>` for the type,
+    // letting the process_file function handle the generic trait bound.
+    let embedding_model: Arc<dyn EmbeddingModel + Send + Sync> = Arc::new(
+        openrouter_client
             .embedding_model(&args.openrouter_model)
             .await?,
     );
@@ -353,7 +356,8 @@ where
 
     // Generate embedding using embed_text
     // Handle potential errors during embedding
-    let embedding = match embedding_model.embed_text(content).await {
+    // Pass content as a slice (&str) instead of String
+    let embedding = match embedding_model.embed_text(&content).await {
         Ok(emb) => emb,
         Err(e) => {
             error!("Failed to embed file {}: {}", path_str, e);
@@ -375,7 +379,8 @@ where
         .map_err(|e| anyhow!("Failed to convert metadata to Qdrant Payload: {}", e))?;
 
     // Create Qdrant point
-    let point = PointStruct::new(point_id, embedding.vector.into(), payload);
+    // Use the correct field name 'vec' instead of 'vector'
+    let point = PointStruct::new(point_id, embedding.vec.into(), payload);
 
     Ok(Some(point))
 }
