@@ -18,7 +18,7 @@ use rig::{
     embeddings::embedding::EmbeddingModel, // Import the trait
     // Removed unused Embeddings, EmbeddingsBuilder
     // Removed unused vector_store imports (Point, PointData, VectorStoreIndex)
-    providers::openai, // Import the openai provider module instead of openrouter
+    providers::openrouter, // Import the openai provider module instead of openrouter
 };
 // Removed unused import: use rig_qdrant::QdrantVectorStore;
 use serde::{Deserialize, Serialize};
@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
     // --- OpenAI Client (Configured for OpenRouter) & Embedding Model ---
     // Use the OpenAI client builder, setting the OpenRouter API base and key.
     // OpenRouter uses "https://openrouter.ai/api/v1" as the base URL.
-    let openai_client = openai::ClientBuilder::new()
+    let openai_client = openrouter::ClientBuilder::new()
         .api_key(&args.openrouter_key)
         .base_url("https://openrouter.ai/api/v1") // Set OpenRouter base URL
         .build()?;
