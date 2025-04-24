@@ -18,7 +18,7 @@ use rig::{
     embeddings::embedding::EmbeddingModel, // Import the trait
     // Removed unused Embeddings, EmbeddingsBuilder
     // Removed unused vector_store imports (Point, PointData, VectorStoreIndex)
-    providers::openrouter, // Import the openai provider module instead of openrouter
+    providers::{openrouter, openai}, // Import the openai provider module
 };
 // Removed unused import: use rig_qdrant::QdrantVectorStore;
 use serde::{Deserialize, Serialize};
@@ -110,16 +110,27 @@ async fn main() -> Result<()> {
     // --- Initialize Clients ---
     info!("Initializing clients...");
 
+    // --- OpenRouter Client & Embedding Model ---
+    // Use the OpenRouter client directly, setting the API key and base URL.
+    let openrouter_client = openrouter::Client::from_url(
+        &args.openrouter_key,
+        "https://openrouter.ai/api/v1", // Set OpenRouter base URL
+    );
+
+    // Get the concrete embedding model type from the OpenRouter client.
+    // The type is openai::EmbeddingModel, obtained via the OpenRouter client.
+    // Note: OpenRouter client in rig currently doesn't directly provide embedding models.
+    // We might need to use the OpenAI provider configured for OpenRouter.
+    // Let's assume for now the OpenRouter client *can* vend an OpenAI-compatible model interface.
+    // If not, we'll need to adjust how the embedding model is obtained.
+    // Reverting to using the openai provider configured for OpenRouter seems more likely correct.
+
     // --- OpenAI Client (Configured for OpenRouter) & Embedding Model ---
-    // Use the OpenAI client builder, setting the OpenRouter API base and key.
-    // OpenRouter uses "https://openrouter.ai/api/v1" as the base URL.
-    let openai_client = openrouter::ClientBuilder::new()
+    let openai_client = rig::providers::openai::ClientBuilder::new()
         .api_key(&args.openrouter_key)
         .base_url("https://openrouter.ai/api/v1") // Set OpenRouter base URL
         .build()?;
 
-    // Get the concrete embedding model type from the OpenAI client.
-    // The type is openai::EmbeddingModel, not a trait object.
     let embedding_model: Arc<openai::EmbeddingModel> = Arc::new(
         openai_client
             .embedding_model(&args.openrouter_model) // Use the model name specified
@@ -384,8 +395,10 @@ where
         .map_err(|e| anyhow!("Failed to convert metadata to Qdrant Payload: {}", e))?;
 
     // Create Qdrant point
-    // Use the correct field name 'vec' and explicitly convert to qdrant::Vectors
-    let vectors: qdrant_client::qdrant::Vectors = embedding.vec.into();
+    // Convert Vec<f64> to Vec<f32> as Qdrant client expects f32
+    let vector_f32: Vec<f32> = embedding.vector.into_iter().map(|v| v as f32).collect();
+    // Use the correct field name 'vector' and explicitly convert Vec<f32> to qdrant::Vectors
+    let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
     let point = PointStruct::new(point_id, vectors, payload);
 
     Ok(Some(point))
