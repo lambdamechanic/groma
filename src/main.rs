@@ -159,7 +159,6 @@ async fn main() -> Result<()> {
             qdrant_client.clone(),
             embedding_model.clone(),
             &text_splitter, // Pass splitter reference
-            &text_splitter, // Pass splitter reference
             &file_path,
             &path_str,
             &collection_name, // Pass collection name
