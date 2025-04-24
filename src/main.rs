@@ -13,7 +13,8 @@ use qdrant_client::{
     },
     Qdrant, // Use the new Qdrant struct
 };
-use rig_core::{
+// Use the main `rig` crate instead of `rig_core`
+use rig::{
     embeddings::{embedding::EmbeddingModel, Embeddings, EmbeddingsBuilder}, // Add EmbeddingsBuilder
     vector_store::{VectorStoreIndex, Point, PointData},
     providers::openrouter::OpenRouterProvider,
@@ -309,9 +310,9 @@ async fn get_existing_hash(client: Arc<Qdrant>, point_id: PointId) -> Result<Opt
     // Process the response which is now Vec<RetrievedPoint>
     if let Some(point) = points_response.result.into_iter().next() {
         // Payload is Option<Payload>
-        if let Some(payload_struct) = point.payload { // Use a different variable name for clarity
-            // Access the inner map using inner() which returns &HashMap
-            if let Some(hash_value) = payload_struct.inner().get("hash") {
+        if let Some(payload) = point.payload { // Payload is the struct itself
+            // Access the "hash" field directly using get() on the Payload struct
+            if let Some(hash_value) = payload.get("hash") {
                 return Ok(hash_value.as_str().map(String::from));
             }
         }
