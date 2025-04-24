@@ -19,7 +19,7 @@ use rig::{
         embedding::EmbeddingModel,
         EmbeddingsBuilder, // Import the trait and builder
     },
-    OneOrMany, // Import OneOrMany for handling embedding results (Moved to top level)
+    // Removed unused OneOrMany import
     // Removed unused Embeddings
     // Removed unused vector_store imports (Point, PointData, VectorStoreIndex)
     providers::openai, // Import the openai provider module
@@ -201,7 +201,7 @@ async fn main() -> Result<()> {
     let text_splitter = create_text_splitter().context("Failed to create text splitter")?;
 
     let mut documents_to_embed: Vec<LongDocument> = Vec::new();
-    let mut _total_processed_files = 0; // Renamed to suppress warning
+    let mut total_processed_files = 0; // Renamed back - it is used now
     let mut total_skipped_files = 0;
     let mut total_failed_files = 0;
     let mut files_requiring_processing = 0;
