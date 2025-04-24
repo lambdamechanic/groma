@@ -34,11 +34,12 @@ You also need an OpenAI API key.
         export QDRANT_URL='http://your-qdrant-host:6334'
         ```
 
-2.  **Build the Tool:**
+2.  **Install the Tool:**
+    Navigate to the cloned repository directory and run:
     ```bash
-    cargo build
+    cargo install --path .
     ```
-    (For optimized performance, use `cargo build --release`)
+    This will compile the `groma` binary and place it in your Cargo bin directory (usually `~/.cargo/bin/`), making it available in your PATH.
 
 3.  **Run Groma:**
 
@@ -47,13 +48,7 @@ You also need an OpenAI API key.
     **Example:** Find files related to "database connection pooling".
 
     ```bash
-    echo "database connection pooling" | cargo run -- --folder /path/to/your/repo/subdir --cutoff 0.7
-    ```
-
-    Or using the release build:
-
-    ```bash
-    echo "database connection pooling" | ./target/release/groma --folder /path/to/your/repo/subdir --cutoff 0.7
+    echo "database connection pooling" | groma --folder /path/to/your/repo/subdir --cutoff 0.7
     ```
 
     **Arguments:**
