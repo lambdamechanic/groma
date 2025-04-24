@@ -221,11 +221,13 @@ async fn main() -> Result<()> {
 
     // --- Search Qdrant ---
     info!("Searching for relevant files...");
+    // Convert query embedding Vec<f64> to Vec<f32> for Qdrant
+    let query_vector_f32: Vec<f32> = query_embedding.vec.into_iter().map(|v| v as f32).collect();
+
     // Use the builder pattern for search_points
-    // Use the correct field name 'vec' for the embedding vector
     let search_result = qdrant_client
         .search_points(
-            SearchPointsBuilder::new(QDRANT_COLLECTION_NAME, query_embedding.vec.into(), 100) // collection, vector, limit
+            SearchPointsBuilder::new(QDRANT_COLLECTION_NAME, query_vector_f32, 100) // collection, vector (now f32), limit
                 .with_payload(true) // Request payload
                 .score_threshold(args.cutoff), // Apply cutoff
         )
