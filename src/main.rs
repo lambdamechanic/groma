@@ -17,7 +17,7 @@ use rig::{
         embed::{Embed, EmbedError, TextEmbedder}, // Import Embed trait and helpers
         embedding::EmbeddingModel,
         EmbeddingsBuilder, // Import the trait and builder
-        OneOrMany, // Import OneOrMany for handling embedding results
+    //    OneOrMany, // Import OneOrMany for handling embedding results
     },
     // Removed unused Embeddings
     // Removed unused vector_store imports (Point, PointData, VectorStoreIndex)
