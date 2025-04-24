@@ -18,7 +18,7 @@ use rig::{
     embeddings::embedding::EmbeddingModel, // Import the trait
     // Removed unused Embeddings, EmbeddingsBuilder
     // Removed unused vector_store imports (Point, PointData, VectorStoreIndex)
-    providers::openrouter, // Import the openrouter provider module
+    providers::openai, // Import the openai provider module instead of openrouter
 };
 // Removed unused import: use rig_qdrant::QdrantVectorStore;
 use serde::{Deserialize, Serialize};
@@ -110,19 +110,23 @@ async fn main() -> Result<()> {
     // --- Initialize Clients ---
     info!("Initializing clients...");
 
-    // OpenRouter Client & Embedding Model
-    // Use the Client struct from the openrouter module
-    let openrouter_client = openrouter::Client::new(&args.openrouter_key);
-    // Get the embedding model using the client.
-    // We can use `Arc<dyn EmbeddingModel + Send + Sync>` for the type,
-    // letting the process_file function handle the generic trait bound.
-    let embedding_model: Arc<dyn EmbeddingModel + Send + Sync> = Arc::new(
-        openrouter_client
-            .embedding_model(&args.openrouter_model)
+    // --- OpenAI Client (Configured for OpenRouter) & Embedding Model ---
+    // Use the OpenAI client builder, setting the OpenRouter API base and key.
+    // OpenRouter uses "https://openrouter.ai/api/v1" as the base URL.
+    let openai_client = openai::ClientBuilder::new()
+        .api_key(&args.openrouter_key)
+        .base_url("https://openrouter.ai/api/v1") // Set OpenRouter base URL
+        .build()?;
+
+    // Get the concrete embedding model type from the OpenAI client.
+    // The type is openai::EmbeddingModel, not a trait object.
+    let embedding_model: Arc<openai::EmbeddingModel> = Arc::new(
+        openai_client
+            .embedding_model(&args.openrouter_model) // Use the model name specified
             .await?,
     );
     info!(
-        "Using OpenRouter model: {} (Dimension: {})", // Note: EMBEDDING_DIMENSION might need adjustment based on the actual model
+        "Using Embedding model via OpenRouter: {} (Dimension: {})", // Note: EMBEDDING_DIMENSION might need adjustment based on the actual model
         args.openrouter_model, EMBEDDING_DIMENSION
     );
 
@@ -197,8 +201,9 @@ async fn main() -> Result<()> {
     info!("Processing query...");
 
     // --- Embed Query ---
+    // Use embed_text and pass the query as &str
     let query_embedding = embedding_model
-        .embed_string(query.to_string())
+        .embed_text(query) // Use embed_text and pass &str directly
         .await
         .context("Failed to embed query")?;
 
@@ -379,8 +384,9 @@ where
         .map_err(|e| anyhow!("Failed to convert metadata to Qdrant Payload: {}", e))?;
 
     // Create Qdrant point
-    // Use the correct field name 'vec' instead of 'vector'
-    let point = PointStruct::new(point_id, embedding.vec.into(), payload);
+    // Use the correct field name 'vec' and explicitly convert to qdrant::Vectors
+    let vectors: qdrant_client::qdrant::Vectors = embedding.vec.into();
+    let point = PointStruct::new(point_id, vectors, payload);
 
     Ok(Some(point))
 }
