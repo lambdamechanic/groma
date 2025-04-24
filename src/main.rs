@@ -386,7 +386,7 @@ fn calculate_hash(file_path: &Path) -> Result<String> {
 // Use the correct import path for MatchValue and remove unused Match
 use qdrant_client::qdrant::{
     r#match::MatchValue, // Correct import path for MatchValue
-    Condition, DeletePointsBuilder, Filter, // Removed unused PointsSelector and Match
+    Condition, Filter, // Removed unused PointsSelector, Match, and DeletePointsBuilder
 }; // Imports for filtering/deleting
 
 // Fetches the hash of *one* existing chunk for a given file path.
@@ -427,7 +427,8 @@ async fn delete_points_by_path(client: Arc<Qdrant>, path_str: &str) -> Result<()
         collection_name: QDRANT_COLLECTION_NAME.to_string(),
         wait: None, // Or Some(true) if needed
         ordering: None,
-        points_selector: Some(qdrant_client::qdrant::PointsSelector {
+        // Use the 'points' field instead of 'points_selector'
+        points: Some(qdrant_client::qdrant::PointsSelector {
             points_selector_one_of: Some(
                 qdrant_client::qdrant::points_selector::PointsSelectorOneOf::Filter(filter),
             ),
