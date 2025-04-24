@@ -636,7 +636,8 @@ where
                 let point = PointStruct::new(point_id, vectors, payload);
                 points_to_upsert.push(point);
             }
-            rig::embeddings::OneOrMany::Many(embeddings) => {
+            // Use the imported OneOrMany directly
+            OneOrMany::Many(embeddings) => {
                  // This case might occur if the model returns multiple embeddings per document.
                  // Decide how to handle this - perhaps create multiple points or log a warning.
                  warn!("Received multiple embeddings for chunk {} of file {}. Skipping.", chunk_index, path_str);
