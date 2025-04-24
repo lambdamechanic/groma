@@ -1,113 +1,120 @@
-use anyhow::{anyhow, Context, Result};
-use clap::Parser;
-// Use the new Qdrant client struct and builder patterns
-use qdrant_client::{
-    Payload, // Import Payload struct directly from crate root
-    qdrant::{
-        point_id::PointIdOptions, CreateCollectionBuilder, Distance, PointStruct,
-        SearchPointsBuilder, VectorParams, VectorsConfig, PointId, // Removed GetPointsBuilder
-        UpsertPointsBuilder, // Import UpsertPointsBuilder
-        PayloadIncludeSelector, // Import PayloadIncludeSelector
-    },
-    Qdrant, // Use the new Qdrant struct
-};
-// Use the main `rig` crate
-// Use the main `rig` crate
-use rig::{
-    embeddings::{
-        embed::{Embed, EmbedError, TextEmbedder}, // Import Embed trait and helpers
-        embedding::EmbeddingModel,
-        EmbeddingsBuilder, // Import the trait and builder
-    },
-    // Removed unused OneOrMany import
-    // Removed unused Embeddings
-    // Removed unused vector_store imports (Point, PointData, VectorStoreIndex)
-    providers::openai, // Import the openai provider module
-};
-// Removed unused import: use rig_qdrant::QdrantVectorStore;
-use serde::{Deserialize, Serialize};
-use git2::Repository; // Import Repository from git2
-use sha2::{Digest, Sha256};
-// Removed join_all import
+// Standard library imports
 use std::{
+    collections::HashMap, // Moved here
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
     sync::Arc,
 };
-// Removed tabled imports
-use tracing::{debug, error, info, warn, Level};
-use tracing_subscriber::{EnvFilter, FmtSubscriber}; // Import EnvFilter
-use url::Url;
-// Import TextSplitter
-use text_splitter::TextSplitter; // Removed note about ChunkConfig
-// Import the specific tokenizer type needed for TextSplitter signature
+
+// External crate imports
+use anyhow::{anyhow, Context, Result};
+use clap::Parser;
+use git2::Repository;
+use hex; // Added for encoding hashes
+use qdrant_client::{
+    qdrant::{
+        point_id::PointIdOptions, r#match::MatchValue, Condition, CreateCollectionBuilder, // Added MatchValue, Condition
+        Distance, Filter, PayloadIncludeSelector, PointId, PointStruct, SearchPointsBuilder, // Added Filter
+        UpsertPointsBuilder, VectorParams, VectorsConfig,
+    },
+    Payload, Qdrant,
+};
+use rig::{
+    embeddings::{
+        embed::{Embed, EmbedError, TextEmbedder},
+        embedding::EmbeddingModel,
+        EmbeddingsBuilder,
+    },
+    providers::openai,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use text_splitter::TextSplitter;
 use tiktoken_rs::{cl100k_base, CoreBPE};
+use tracing::{debug, error, info, warn, Level};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
+use url::Url;
 use uuid::Uuid;
-// Removed unused import: use rig::OneOrMany;
 
-// Removed const QDRANT_COLLECTION_NAME
-// This needs to match the output dimension of the chosen OpenRouter embedding model
-// Example: text-embedding-3-small is 1536, text-embedding-ada-002 is 1536
-// Let's make it configurable or fetch dynamically if possible, but start with a common default.
+// --- Constants ---
+
+/// The embedding dimension used by the default OpenAI model (`text-embedding-3-small`).
+/// This MUST match the dimension of the chosen embedding model.
 const EMBEDDING_DIMENSION: u64 = 1536;
-// Removed unused BATCH_SIZE constant
-const QDRANT_UPSERT_BATCH_SIZE: usize = 100; // For batch upserting to Qdrant
+/// The number of points to upsert to Qdrant in a single batch.
+const QDRANT_UPSERT_BATCH_SIZE: usize = 100;
+/// The target size for text chunks in tokens before embedding.
+const TARGET_CHUNK_SIZE_TOKENS: usize = 512;
 
+// --- Command Line Arguments ---
+
+/// Defines the command-line arguments accepted by the application.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the folder within a Git repository to scan
-    folder: PathBuf, // Now a positional argument
+    /// Path to the folder within a Git repository to scan.
+    folder: PathBuf,
 
-    /// Relevance cutoff for results (e.g., 0.7)
+    /// Relevance cutoff for results (e.g., 0.7). Only results with a score
+    /// above this threshold will be shown.
     #[arg(short, long)]
     cutoff: f32,
 
-    /// OpenAI API Key
+    /// OpenAI API Key. Can also be set via the OPENAI_API_KEY environment variable.
     #[arg(long, env = "OPENAI_API_KEY")]
     openai_key: String,
 
-    /// OpenAI Embedding Model name (e.g., "text-embedding-3-small")
+    /// OpenAI Embedding Model name (e.g., "text-embedding-3-small").
     #[arg(long, default_value = "text-embedding-3-small")]
     openai_model: String,
 
-    /// Qdrant server URL (points to gRPC port)
+    /// Qdrant server URL (points to the gRPC port, e.g., http://localhost:6334).
+    /// Can also be set via the QDRANT_URL environment variable.
     #[arg(long, env = "QDRANT_URL", default_value = "http://localhost:6334")]
     qdrant_url: Url,
 
-    /// Suppress checking for file updates and upserting to Qdrant
+    /// Suppress checking for file updates and upserting to Qdrant.
+    /// Useful for querying existing data without modifying the index.
     #[arg(long)]
     suppress_updates: bool,
 
-    /// Enable debug logging
+    /// Enable debug logging. By default, only errors are logged unless RUST_LOG is set.
     #[arg(long)]
     debug: bool,
 }
 
+// --- Data Structures ---
+
+/// Metadata associated with each chunk stored in Qdrant.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct FileMetadata {
-    path: String, // Original file path
-    hash: String, // Hash of the entire original file
-    chunk_index: usize, // Index of this chunk within the file
-    // Removed text field as it's not stored in Qdrant payload
+    /// The canonical path of the original file.
+    path: String,
+    /// The SHA256 hash of the entire original file content.
+    hash: String,
+    /// The 0-based index of this chunk within the original file.
+    chunk_index: usize,
 }
 
-// Struct to hold file content and metadata, implementing the Embed trait
+/// Represents a document (file) to be processed and embedded.
+/// Implements the `Embed` trait for use with `rig::EmbeddingsBuilder`.
 #[derive(Debug)]
 struct LongDocument<'a> {
+    /// The canonical path of the file.
     path_str: String,
+    /// The current SHA256 hash of the file content.
     current_hash: String,
+    /// The full content of the file.
     content: String,
-    text_splitter: &'a TextSplitter<CoreBPE>, // Reference to the splitter
+    /// A reference to the text splitter for chunking.
+    text_splitter: &'a TextSplitter<CoreBPE>,
 }
 
-// Implement the Embed trait for LongDocument
-// This tells the EmbeddingsBuilder how to get the text pieces to embed from our struct
 impl<'a> Embed for LongDocument<'a> {
+    /// Chunks the document's content using the text splitter and provides
+    /// each non-empty chunk to the `TextEmbedder`.
     fn embed(&self, embedder: &mut TextEmbedder) -> Result<(), EmbedError> {
-        const TARGET_CHUNK_SIZE_TOKENS: usize = 512; // Define chunk size here or pass it in
-
         // Use the text_splitter reference to chunk the content
         let chunks = self
             .text_splitter
