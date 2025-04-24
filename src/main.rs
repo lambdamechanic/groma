@@ -290,7 +290,7 @@ fn create_text_splitter() -> Result<TextSplitter<CoreBPE>> {
     // Configure the splitter directly. Chunk size is passed to .chunks() later.
     // Overlap is handled implicitly by the splitter algorithm aiming for the target size.
     Ok(TextSplitter::new(tokenizer)
-        .with_trim(true)) // Configure trimming directly
+        .with_trim_chunks(true)) // Use with_trim_chunks
 }
 // Note: Chunk size (e.g., 512) and overlap (e.g., 50) are now handled
 // differently. Size is passed to .chunks(), overlap is less explicit.
@@ -386,7 +386,7 @@ fn calculate_hash(file_path: &Path) -> Result<String> {
 // Use the correct import path for MatchValue and remove unused Match
 use qdrant_client::qdrant::{
     r#match::MatchValue, // Correct import path for MatchValue
-    Condition, DeletePointsBuilder, Filter, PointsSelector, // Removed Match
+    Condition, DeletePointsBuilder, Filter, // Removed unused PointsSelector and Match
 }; // Imports for filtering/deleting
 
 // Fetches the hash of *one* existing chunk for a given file path.
