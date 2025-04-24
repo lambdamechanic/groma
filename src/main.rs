@@ -135,7 +135,7 @@ async fn main() -> Result<()> {
     let embedding_model: Arc<openai::EmbeddingModel> = Arc::new(
         openai_client
             .embedding_model(&args.openrouter_model) // Use the model name specified
-            .await?,
+        // This method returns the model directly, not a future
     );
     info!(
         "Using Embedding model via OpenRouter: {} (Dimension: {})", // Note: EMBEDDING_DIMENSION might need adjustment based on the actual model
