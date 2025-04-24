@@ -22,7 +22,7 @@ use rig::{
 use serde::{Deserialize, Serialize};
 use git2::Repository; // Import Repository from git2
 use sha2::{Digest, Sha256};
-// Removed join_all import as EmbeddingsBuilder handles concurrency
+use futures::future::join_all; // Re-add join_all for file processing futures
 use std::{
     fs,
     io::{self, Read},
@@ -38,6 +38,7 @@ use text_splitter::TextSplitter; // Removed note about ChunkConfig
 // Import the specific tokenizer type needed for TextSplitter signature
 use tiktoken_rs::{cl100k_base, CoreBPE};
 use uuid::Uuid;
+use rig::OneOrMany; // Import OneOrMany directly
 
 // Removed const QDRANT_COLLECTION_NAME
 // This needs to match the output dimension of the chosen OpenRouter embedding model
@@ -577,7 +578,7 @@ where
     // Chunk the content using the text splitter's token-based chunks method
     // Pass the desired chunk size (in tokens) here.
     const TARGET_CHUNK_SIZE_TOKENS: usize = 512;
-    const TARGET_CHUNK_SIZE_TOKENS: usize = 512;
+    // Removed duplicate definition of TARGET_CHUNK_SIZE_TOKENS
     let chunks: Vec<&str> = text_splitter.chunks(&content, TARGET_CHUNK_SIZE_TOKENS).collect();
     info!("Split '{}' into {} chunks (target size: {} tokens).", path_str, chunks.len(), TARGET_CHUNK_SIZE_TOKENS);
 
@@ -591,7 +592,8 @@ where
 
     // Use EmbeddingsBuilder for batching and parallelism
     debug!("Generating embeddings for {} chunks using EmbeddingsBuilder...", chunk_strings.len());
-    let embedding_results = EmbeddingsBuilder::new(embedding_model.clone())
+    // Clone the model *inside* the Arc, as EmbeddingsBuilder expects the model itself.
+    let embedding_results = EmbeddingsBuilder::new((*embedding_model).clone())
         .documents(chunk_strings)? // Pass owned Strings
         .build()
         .await
@@ -605,7 +607,8 @@ where
     for (chunk_index, (_original_text, embedding_result)) in embedding_results.into_iter().enumerate() {
         // Assuming OneOrMany::One for simplicity, handle Many if needed
         match embedding_result {
-            rig::embeddings::OneOrMany::One(embedding) => {
+            // Use the imported OneOrMany directly
+            OneOrMany::One(embedding) => {
                 let chunk_uuid = generate_uuid_for_chunk(path_str, chunk_index);
                 let point_id = uuid_to_point_id(chunk_uuid);
 
