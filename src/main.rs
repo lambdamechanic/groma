@@ -23,6 +23,7 @@ use rig::{
 use serde::{Deserialize, Serialize};
 use git2::Repository; // Import Repository from git2
 use sha2::{Digest, Sha256};
+use futures::future::join_all; // Import join_all for concurrent futures
 use std::{
     fs,
     io::{self, Read},
@@ -554,30 +555,48 @@ where
 
     let mut points_to_upsert = Vec::with_capacity(chunks.len());
 
-    // Embed chunks in batches for efficiency
-    let chunk_batches = chunks.chunks(BATCH_SIZE); // Use BATCH_SIZE defined earlier
+    // Create futures for embedding each batch in parallel
+    let embedding_futures = chunks
+        .chunks(BATCH_SIZE) // Use BATCH_SIZE defined earlier
+        .enumerate()
+        .map(|(batch_index, text_batch)| {
+            // Clone Arcs and necessary data for the async block
+            let model = embedding_model.clone();
+            let path_str_clone = path_str.to_string(); // Clone path string for logging/error context
+            // Convert Vec<&str> to Vec<String> for embed_texts
+            let text_batch_strings: Vec<String> = text_batch.iter().map(|&s| s.to_string()).collect();
 
-    for (batch_index, text_batch) in chunk_batches.enumerate() {
-        debug!("Embedding batch {} for file {}", batch_index, path_str);
-        // Convert Vec<&str> to Vec<String> for embed_texts
-        let text_batch_strings: Vec<String> = text_batch.iter().map(|&s| s.to_string()).collect();
-        // Use embed_texts for batching with the converted strings
-        let embeddings = match embedding_model.embed_texts(text_batch_strings).await {
-             Ok(embs) => embs,
-             Err(e) => {
-                 error!("Failed to embed batch {} for file {}: {}", batch_index, path_str, e);
-                 // Skip this batch, or potentially the whole file? For now, skip batch.
-                 continue; // Or return Err(...) if one batch failure should stop the file processing
-             }
-         };
+            // Create an async block (future) for embedding this batch
+            async move {
+                debug!("Starting embedding for batch {} of file {}", batch_index, path_str_clone);
+                match model.embed_texts(text_batch_strings).await {
+                    Ok(embeddings) => {
+                        debug!("Finished embedding for batch {} of file {}", batch_index, path_str_clone);
+                        Ok((batch_index, embeddings)) // Return batch index along with embeddings
+                    }
+                    Err(e) => {
+                        error!("Failed to embed batch {} for file {}: {}", batch_index, path_str_clone, e);
+                        Err(e) // Propagate the error
+                    }
+                }
+            }
+        })
+        .collect::<Vec<_>>();
 
-        // Create points for the successful batch
-        for (i, embedding) in embeddings.into_iter().enumerate() {
-            let chunk_index = batch_index * BATCH_SIZE + i; // Calculate overall chunk index
-            let chunk_uuid = generate_uuid_for_chunk(path_str, chunk_index);
-            let point_id = uuid_to_point_id(chunk_uuid);
+    // Execute all embedding futures concurrently
+    let embedding_results = join_all(embedding_futures).await;
 
-            let metadata = FileMetadata {
+    // Process results and create points
+    for result in embedding_results {
+        match result {
+            Ok((batch_index, embeddings)) => {
+                // Create points for the successful batch
+                for (i, embedding) in embeddings.into_iter().enumerate() {
+                    let chunk_index = batch_index * BATCH_SIZE + i; // Calculate overall chunk index
+                    let chunk_uuid = generate_uuid_for_chunk(path_str, chunk_index);
+                    let point_id = uuid_to_point_id(chunk_uuid);
+
+                    let metadata = FileMetadata {
                 path: path_str.to_string(),
                 hash: current_hash.clone(), // Use the hash of the whole file
                 chunk_index,
