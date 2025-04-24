@@ -33,8 +33,8 @@ use tabled::{Table, Tabled};
 use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use url::Url;
-// Import TextSplitter and ChunkConfig (needed for the constructor)
-use text_splitter::{ChunkConfig, TextSplitter};
+// Import TextSplitter (ChunkConfig is handled internally by the builder pattern)
+use text_splitter::TextSplitter;
 // Import the specific tokenizer type needed for TextSplitter signature
 use tiktoken_rs::{cl100k_base, CoreBPE};
 use uuid::Uuid;
@@ -294,8 +294,8 @@ fn create_text_splitter() -> Result<TextSplitter<CoreBPE>> {
         // .with_max_chunk_size_chars(8191 * 4) // This is less relevant when using token splitter
         .with_trim(true); // Trim whitespace
 
-    // Use the constructor designed for tiktoken integration
-    Ok(TextSplitter::from_tiktoken_with_config(tokenizer, chunk_config))
+    // Use the correct constructor pattern: new(tokenizer).with_config(config)
+    Ok(TextSplitter::new(tokenizer).with_config(chunk_config))
 }
 
 
@@ -386,18 +386,18 @@ fn calculate_hash(file_path: &Path) -> Result<String> {
     Ok(hex::encode(hash_bytes))
 } // <-- Added missing closing brace
 
-// Use the correct import path for MatchValue and remove unused FieldCondition
+// Use the correct import path for MatchValue and remove unused Match
 use qdrant_client::qdrant::{
     r#match::MatchValue, // Correct import path for MatchValue
-    Condition, DeletePointsBuilder, Filter, Match, PointsSelector,
+    Condition, DeletePointsBuilder, Filter, PointsSelector, // Removed Match
 }; // Imports for filtering/deleting
 
 // Fetches the hash of *one* existing chunk for a given file path.
 async fn get_existing_file_hash(client: Arc<Qdrant>, path_str: &str) -> Result<Option<String>> {
-    // Use MatchValue::keyword directly in Condition::matches
+    // Use MatchValue::Keyword directly in Condition::matches (Corrected case)
     let filter = Filter::must([Condition::matches(
         "path", // Field name in payload
-        MatchValue::keyword(path_str.to_string()), // Use MatchValue::keyword directly
+        MatchValue::Keyword(path_str.to_string()), // Use MatchValue::Keyword (capital K)
     )]);
 
     // Use search instead of get, limit to 1, only fetch hash payload
@@ -419,20 +419,20 @@ async fn get_existing_file_hash(client: Arc<Qdrant>, path_str: &str) -> Result<O
 // Deletes all points associated with a specific file path using a filter.
 async fn delete_points_by_path(client: Arc<Qdrant>, path_str: &str) -> Result<()> {
     info!("Deleting existing chunks for file: {}", path_str);
-    // Use MatchValue::keyword directly in Condition::matches
+    // Use MatchValue::Keyword directly in Condition::matches (Corrected case)
     let filter = Filter::must([Condition::matches(
         "path",
-        MatchValue::keyword(path_str.to_string()), // Use MatchValue::keyword directly
+        MatchValue::Keyword(path_str.to_string()), // Use MatchValue::Keyword (capital K)
     )]);
 
     // Select points based on the filter using the correct enum variant syntax
-    let points_selector = PointsSelector::Filter(filter.into()); // Use .into() if needed, or just filter
+    let points_selector = PointsSelector::Filter(filter.into()); // Correct enum variant usage
 
-    // Use DeletePointsBuilder correctly: new takes name, selector is set via method
+    // Use DeletePointsBuilder correctly: new takes name, selector is set via .selector() method
     client
         .delete_points(
             DeletePointsBuilder::new(QDRANT_COLLECTION_NAME)
-                .points_selector(points_selector) // Set selector using the method
+                .selector(points_selector) // Use .selector() method
             // .wait(true) // Optionally wait
         )
         .await?;
@@ -480,8 +480,8 @@ where
         return Ok(Vec::new());
     }
 
-    // Chunk the content using the text splitter
-    let chunks: Vec<&str> = text_splitter.chunks(&content).collect();
+    // Chunk the content using the text splitter's token-based split method
+    let chunks: Vec<&str> = text_splitter.split(&content).collect(); // Use .split() instead of .chunks()
     info!("Split '{}' into {} chunks.", path_str, chunks.len());
 
     let mut points_to_upsert = Vec::with_capacity(chunks.len());
@@ -491,8 +491,10 @@ where
 
     for (batch_index, text_batch) in chunk_batches.enumerate() {
         debug!("Embedding batch {} for file {}", batch_index, path_str);
-        // Use embed_texts for batching
-        let embeddings = match embedding_model.embed_texts(text_batch).await {
+        // Convert Vec<&str> to Vec<String> for embed_texts
+        let text_batch_strings: Vec<String> = text_batch.iter().map(|&s| s.to_string()).collect();
+        // Use embed_texts for batching with the converted strings
+        let embeddings = match embedding_model.embed_texts(text_batch_strings).await {
              Ok(embs) => embs,
              Err(e) => {
                  error!("Failed to embed batch {} for file {}: {}", batch_index, path_str, e);
