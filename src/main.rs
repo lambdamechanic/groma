@@ -39,7 +39,7 @@ use text_splitter::TextSplitter; // Removed note about ChunkConfig
 use tiktoken_rs::{cl100k_base, CoreBPE};
 use uuid::Uuid;
 
-const QDRANT_COLLECTION_NAME: &str = "groma-files";
+// Removed const QDRANT_COLLECTION_NAME
 // This needs to match the output dimension of the chosen OpenRouter embedding model
 // Example: text-embedding-3-small is 1536, text-embedding-ada-002 is 1536
 // Let's make it configurable or fetch dynamically if possible, but start with a common default.
@@ -130,8 +130,13 @@ async fn main() -> Result<()> {
     let qdrant_client = Arc::new(Qdrant::from_url(&args.qdrant_url.to_string()).build()?);
     info!("Connected to Qdrant at {}", args.qdrant_url);
 
+    // Generate collection name based on folder path
+    let collection_name = generate_collection_name(&args.folder)?;
+    info!("Using Qdrant collection: {}", collection_name);
+
+
     // Ensure Qdrant collection exists
-    ensure_qdrant_collection(qdrant_client.clone()).await?;
+    ensure_qdrant_collection(qdrant_client.clone(), &collection_name).await?;
 
     // Create the text splitter once
     let text_splitter = create_text_splitter()?;
@@ -154,8 +159,10 @@ async fn main() -> Result<()> {
             qdrant_client.clone(),
             embedding_model.clone(),
             &text_splitter, // Pass splitter reference
+            &text_splitter, // Pass splitter reference
             &file_path,
             &path_str,
+            &collection_name, // Pass collection name
         )
         .await
         {
@@ -171,10 +178,11 @@ async fn main() -> Result<()> {
                     // Check if the accumulated batch is large enough to upsert
                     if all_points_to_upsert.len() >= QDRANT_UPSERT_BATCH_SIZE {
                         info!(
-                            "Upserting batch of {} points...",
-                            all_points_to_upsert.len()
+                            "Upserting batch of {} points to collection '{}'...",
+                            all_points_to_upsert.len(),
+                            collection_name
                         );
-                        upsert_batch(qdrant_client.clone(), &all_points_to_upsert).await?;
+                        upsert_batch(qdrant_client.clone(), &collection_name, &all_points_to_upsert).await?;
                         all_points_to_upsert.clear();
                     }
                 }
@@ -189,10 +197,11 @@ async fn main() -> Result<()> {
     // Upsert any remaining points
     if !all_points_to_upsert.is_empty() {
         info!(
-            "Upserting final batch of {} points...",
-            all_points_to_upsert.len()
+            "Upserting final batch of {} points to collection '{}'...",
+            all_points_to_upsert.len(),
+            collection_name
         );
-        upsert_batch(qdrant_client.clone(), &all_points_to_upsert).await?;
+        upsert_batch(qdrant_client.clone(), &collection_name, &all_points_to_upsert).await?;
         all_points_to_upsert.clear();
     }
 
@@ -228,7 +237,7 @@ async fn main() -> Result<()> {
     // Use the builder pattern for search_points
     let search_result = qdrant_client
         .search_points(
-            SearchPointsBuilder::new(QDRANT_COLLECTION_NAME, query_vector_f32, 100) // collection, vector (now f32), limit
+            SearchPointsBuilder::new(&collection_name, query_vector_f32, 100) // Use dynamic collection name
                 .with_payload(true) // Request payload
                 .score_threshold(args.cutoff), // Apply cutoff
         )
@@ -301,20 +310,20 @@ fn create_text_splitter() -> Result<TextSplitter<CoreBPE>> {
 // differently. Size is passed to .chunks(), overlap is less explicit.
 
 
-// Update function signature to use new Qdrant client type
-async fn ensure_qdrant_collection(client: Arc<Qdrant>) -> Result<()> {
+// Update function signature to accept collection_name
+async fn ensure_qdrant_collection(client: Arc<Qdrant>, collection_name: &str) -> Result<()> {
     // Use new list_collections method
     let collections_list = client.list_collections().await?;
     if !collections_list
         .collections
         .iter()
-        .any(|c| c.name == QDRANT_COLLECTION_NAME)
+        .any(|c| c.name == collection_name) // Use dynamic name
     {
-        info!("Collection '{}' not found. Creating...", QDRANT_COLLECTION_NAME);
+        info!("Collection '{}' not found. Creating...", collection_name); // Use dynamic name
         // Use new create_collection method with builder
         client
             .create_collection(
-                CreateCollectionBuilder::new(QDRANT_COLLECTION_NAME)
+                CreateCollectionBuilder::new(collection_name) // Use dynamic name
                     .vectors_config(VectorsConfig::from(VectorParams {
                         size: EMBEDDING_DIMENSION,
                         distance: Distance::Cosine.into(),
@@ -324,13 +333,13 @@ async fn ensure_qdrant_collection(client: Arc<Qdrant>) -> Result<()> {
                     // .payload_schema(...) // Consider adding schema for path/hash indexing
             )
             .await?;
-        info!("Collection '{}' created.", QDRANT_COLLECTION_NAME);
+        info!("Collection '{}' created.", collection_name); // Use dynamic name
         // It might be wise to explicitly create payload indices here too
-        // client.create_payload_index(QDRANT_COLLECTION_NAME, "path", FieldType::Keyword, ...).await?;
-        // client.create_payload_index(QDRANT_COLLECTION_NAME, "hash", FieldType::Keyword, ...).await?;
+        // client.create_payload_index(collection_name, "path", FieldType::Keyword, ...).await?;
+        // client.create_payload_index(collection_name, "hash", FieldType::Keyword, ...).await?;
 
     } else {
-        info!("Collection '{}' already exists.", QDRANT_COLLECTION_NAME);
+        info!("Collection '{}' already exists.", collection_name); // Use dynamic name
     }
     Ok(())
 }
@@ -395,7 +404,8 @@ use qdrant_client::qdrant::{
 }; // Imports for filtering/deleting
 
 // Fetches the hash of *one* existing chunk for a given file path.
-async fn get_existing_file_hash(client: Arc<Qdrant>, path_str: &str) -> Result<Option<String>> {
+// Update signature to accept collection_name
+async fn get_existing_file_hash(client: Arc<Qdrant>, collection_name: &str, path_str: &str) -> Result<Option<String>> {
     // Use MatchValue::Keyword directly in Condition::matches (Corrected case)
     let filter = Filter::must([Condition::matches(
         "path", // Field name in payload
@@ -403,7 +413,7 @@ async fn get_existing_file_hash(client: Arc<Qdrant>, path_str: &str) -> Result<O
     )]);
 
     // Use search instead of get, limit to 1, only fetch hash payload
-    let search_req = SearchPointsBuilder::new(QDRANT_COLLECTION_NAME, vec![0.0; EMBEDDING_DIMENSION as usize], 1) // Dummy vector, limit 1
+    let search_req = SearchPointsBuilder::new(collection_name, vec![0.0; EMBEDDING_DIMENSION as usize], 1) // Use dynamic collection name
         .filter(filter)
         .with_payload(PayloadIncludeSelector { fields: vec!["hash".to_string()] })
         .with_vectors(false);
@@ -419,8 +429,9 @@ async fn get_existing_file_hash(client: Arc<Qdrant>, path_str: &str) -> Result<O
 }
 
 // Deletes all points associated with a specific file path using a filter.
-async fn delete_points_by_path(client: Arc<Qdrant>, path_str: &str) -> Result<()> {
-    info!("Deleting existing chunks for file: {}", path_str);
+// Update signature to accept collection_name
+async fn delete_points_by_path(client: Arc<Qdrant>, collection_name: &str, path_str: &str) -> Result<()> {
+    info!("Deleting existing chunks for file '{}' from collection '{}'", path_str, collection_name);
     // Use MatchValue::Keyword directly in Condition::matches (Corrected case)
     let filter = Filter::must([Condition::matches(
         "path",
@@ -429,7 +440,7 @@ async fn delete_points_by_path(client: Arc<Qdrant>, path_str: &str) -> Result<()
 
     // Manually construct DeletePoints to bypass potential builder method issue
     let delete_request = qdrant_client::qdrant::DeletePoints {
-        collection_name: QDRANT_COLLECTION_NAME.to_string(),
+        collection_name: collection_name.to_string(), // Use dynamic collection name
         wait: None, // Or Some(true) if needed
         ordering: None,
         // Use the 'points' field instead of 'points_selector'
@@ -455,16 +466,18 @@ async fn process_file<E>(
     text_splitter: &TextSplitter<CoreBPE>, // Use concrete CoreBPE type
     file_path: &Path,
     path_str: &str,
+    collection_name: &str, // Add collection_name parameter
 ) -> Result<Vec<PointStruct>> // Return Vec instead of Option
 where
     E: EmbeddingModel + Send + Sync + 'static,
 {
-    debug!("Processing file: {}", path_str);
+    debug!("Processing file: {} for collection {}", path_str, collection_name);
     let current_hash = calculate_hash(file_path)?;
-    let existing_hash = get_existing_file_hash(qdrant_client.clone(), path_str).await?;
+    // Pass collection_name to get_existing_file_hash
+    let existing_hash = get_existing_file_hash(qdrant_client.clone(), collection_name, path_str).await?;
 
     if Some(&current_hash) == existing_hash.as_ref() {
-        debug!("File hash matches, skipping: {}", path_str);
+        debug!("File hash matches, skipping: {} in collection {}", path_str, collection_name);
         return Ok(Vec::new()); // Return empty vec, no points to upsert
     }
 
@@ -475,7 +488,8 @@ where
 
     // If hash differs or file is new, delete existing points for this path
     if existing_hash.is_some() {
-        delete_points_by_path(qdrant_client.clone(), path_str).await?;
+        // Pass collection_name to delete_points_by_path
+        delete_points_by_path(qdrant_client.clone(), collection_name, path_str).await?;
     }
 
     let content = fs::read_to_string(file_path)
@@ -548,15 +562,15 @@ where
     Ok(points_to_upsert)
 }
 
-// Update function signature to use new Qdrant client type
-async fn upsert_batch(client: Arc<Qdrant>, points: &[PointStruct]) -> Result<()> {
+// Update function signature to accept collection_name
+async fn upsert_batch(client: Arc<Qdrant>, collection_name: &str, points: &[PointStruct]) -> Result<()> {
     if points.is_empty() {
         return Ok(());
     }
     // Use new upsert_points method with builder
     client
         .upsert_points(
-            UpsertPointsBuilder::new(QDRANT_COLLECTION_NAME, points.to_vec())
+            UpsertPointsBuilder::new(collection_name, points.to_vec()) // Use dynamic collection name
             // .wait(true) // Optionally wait for operation to complete
         )
         .await
