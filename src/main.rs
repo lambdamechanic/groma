@@ -62,8 +62,8 @@ struct Args {
     #[arg(long, default_value = "text-embedding-3-small")]
     openai_model: String,
 
-    /// Qdrant server URL
-    #[arg(long, env = "QDRANT_URL", default_value = "http://localhost:6333")]
+    /// Qdrant server URL (points to gRPC port)
+    #[arg(long, env = "QDRANT_URL", default_value = "http://localhost:6334")]
     qdrant_url: Url,
 }
 
