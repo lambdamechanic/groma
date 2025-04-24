@@ -57,9 +57,8 @@ const QDRANT_UPSERT_BATCH_SIZE: usize = 100; // For batch upserting to Qdrant
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the folder to scan
-    #[arg(short, long)]
-    folder: PathBuf,
+    /// Path to the folder within a Git repository to scan
+    folder: PathBuf, // Now a positional argument
 
     /// Relevance cutoff for results (e.g., 0.7)
     #[arg(short, long)]

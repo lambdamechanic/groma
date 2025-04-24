@@ -46,12 +46,12 @@ You also need an OpenAI API key.
     **Example:** Find files related to "database connection pooling".
 
     ```bash
-    echo "database connection pooling" | groma --folder /path/to/your/repo/subdir --cutoff 0.7
+    echo "database connection pooling" | groma /path/to/your/repo/subdir --cutoff 0.7
     ```
 
     **Arguments:**
 
-    *   `--folder <PATH>` or `-f <PATH>`: (Required) The path to the folder within a Git repository to scan.
+    *   `<FOLDER_PATH>`: (Required) The path to the folder within a Git repository to scan. This is a positional argument.
     *   `--cutoff <FLOAT>` or `-c <FLOAT>`: (Required) The relevance score cutoff (between 0.0 and 1.0). Only results with a score above this threshold will be shown. A higher value means stricter relevance.
     *   `--openai-key <KEY>`: (Optional) Your OpenAI API key. Defaults to the `OPENAI_API_KEY` environment variable.
     *   `--openai-model <MODEL_NAME>`: (Optional) The OpenAI embedding model to use. Defaults to `text-embedding-3-small`.
