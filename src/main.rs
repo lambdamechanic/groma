@@ -1,12 +1,14 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use futures::stream::{StreamExt, TryStreamExt}; // Removed unused `self` import
-use qdrant_client::QdrantClient; // Use non-deprecated client path
+use futures::stream::{StreamExt, TryStreamExt};
+// Use the correct, nested path for QdrantClient
+use qdrant_client::client::QdrantClient;
 use qdrant_client::qdrant::{
     point_id::PointIdOptions, // Correct path for PointIdVariant/Options
     vectors_config::Config, CreateCollection, Distance, PointStruct, VectorParams,
-    VectorsConfig, PointId, PayloadSelector, WithPayloadSelector, SearchPoints, // Removed unused: FieldType, Condition, Filter, FieldCondition, Match, OrderBy
+    VectorsConfig, PointId, WithPayloadSelector, SearchPoints, // Removed PayloadSelector
     with_payload_selector, // Import the module for SelectorOptions::Include
+    PayloadSelector, // Keep PayloadSelector import for get_existing_hash usage
 };
 use rig_core::{
     embeddings::{embedding::EmbeddingModel, Embeddings},
@@ -14,7 +16,7 @@ use rig_core::{
     providers::openrouter::OpenRouterProvider,
 };
 // use rig_openrouter::OpenRouterProvider; // Removed incorrect use statement
-use rig_qdrant::QdrantVectorStore; // Correct struct name
+// Removed unused import: use rig_qdrant::QdrantVectorStore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -304,11 +306,13 @@ async fn get_existing_hash(client: Arc<QdrantClient>, point_id: PointId) -> Resu
     let points = client
         .get_points(
             QDRANT_COLLECTION_NAME, // collection_name
-            &[point_id],            // points selector
+            &[point_id], // points selector
             Some(WithPayloadSelector { // with_payload
-                 selector_options: Some(with_payload_selector::SelectorOptions::Include(PayloadSelector{
-                    include_points: vec!["hash".to_string()], // Only fetch the hash
-                 }))
+                selector_options: Some(with_payload_selector::SelectorOptions::Include(
+                    PayloadSelector { // Use the imported PayloadSelector struct directly
+                        include_points: vec!["hash".to_string()], // Only fetch the hash
+                    },
+                )),
             }),
             None, // with_vectors
             None, // read_consistency
