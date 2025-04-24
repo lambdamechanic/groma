@@ -97,9 +97,10 @@ fn uuid_to_point_id(uuid: Uuid) -> PointId {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing subscriber for logging
+    // Initialize tracing subscriber for logging to stderr
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO) // Adjust level as needed (e.g., DEBUG for more details)
+        .with_writer(std::io::stderr) // Configure the writer to use stderr
         .finish();
     tracing::subscriber::set_global_default(subscriber)
         .expect("setting default subscriber failed");
