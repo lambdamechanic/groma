@@ -126,10 +126,7 @@ impl<'a> Embed for LongDocument<'a> {
             if !chunk.trim().is_empty() {
                 embedder.embed(chunk.to_string()); // Pass ownership of the string chunk
                 chunk_count += 1;
-            if !chunk.trim().is_empty() {
-                embedder.embed(chunk.to_string());
-                chunk_count += 1;
-            }
+            } // <-- Added missing closing brace and removed duplicated block
         }
         // It's okay if a document yields no chunks (e.g., only whitespace).
         // The calling code handles skipping empty files before creating LongDocument.
