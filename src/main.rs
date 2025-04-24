@@ -634,6 +634,7 @@ async fn delete_points_by_path(client: Arc<Qdrant>, collection_name: &str, path_
 
     client.delete_points(delete_request).await?; // Pass the constructed struct
     Ok(())
+} // <-- Added missing closing brace
 // Removed process_file function as its logic is now integrated into the main loop phases
 
 // Update function signature to accept collection_name
