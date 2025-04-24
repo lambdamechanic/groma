@@ -422,14 +422,20 @@ async fn delete_points_by_path(client: Arc<Qdrant>, path_str: &str) -> Result<()
         MatchValue::Keyword(path_str.to_string()), // Use MatchValue::Keyword (capital K)
     )]);
 
-    // Use DeletePointsBuilder with the filter directly
-    client
-        .delete_points(
-            DeletePointsBuilder::new(QDRANT_COLLECTION_NAME)
-                .filter(filter) // Apply the filter directly
-            // .wait(true) // Optionally wait
-        )
-        .await?;
+    // Manually construct DeletePoints to bypass potential builder method issue
+    let delete_request = qdrant_client::qdrant::DeletePoints {
+        collection_name: QDRANT_COLLECTION_NAME.to_string(),
+        wait: None, // Or Some(true) if needed
+        ordering: None,
+        points_selector: Some(qdrant_client::qdrant::PointsSelector {
+            points_selector_one_of: Some(
+                qdrant_client::qdrant::points_selector::PointsSelectorOneOf::Filter(filter),
+            ),
+        }),
+        shard_key_selector: None, // Assuming None is appropriate for this version/setup
+    };
+
+    client.delete_points(delete_request).await?; // Pass the constructed struct
     Ok(())
 }
 
