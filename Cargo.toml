@@ -13,7 +13,8 @@ clap = { version = "4.4", features = ["derive", "env"] } # Add 'env' feature
 tokio = { version = "1", features = ["full"] }
 sha2 = "0.10"
 hex = "0.4"
-walkdir = "2.4"
+walkdir = "2.4" # Keep for now, might remove later if fully replaced
+git2 = "0.19" # Add git2 crate
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

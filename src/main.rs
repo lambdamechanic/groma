@@ -22,6 +22,7 @@ use rig::{
 };
 // Removed unused import: use rig_qdrant::QdrantVectorStore;
 use serde::{Deserialize, Serialize};
+use git2::Repository; // Import Repository from git2
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -280,17 +281,48 @@ async fn ensure_qdrant_collection(client: Arc<Qdrant>) -> Result<()> {
     Ok(())
 }
 
+// Updated scan_folder to use git ls-files logic
 fn scan_folder(folder_path: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    for entry in walkdir::WalkDir::new(folder_path)
-        .into_iter()
-        .filter_map(Result::ok) // Ignore errors during walk
-        .filter(|e| e.file_type().is_file())
-    {
-        files.push(entry.path().to_path_buf());
+    info!("Scanning for Git tracked files in: {}", folder_path.display());
+
+    // Discover the git repository containing the folder_path
+    let repo = Repository::discover(folder_path)
+        .with_context(|| format!("Failed to find Git repository containing path: {}", folder_path.display()))?;
+
+    let workdir = repo.workdir().ok_or_else(|| anyhow!("Git repository is bare, cannot list files in workdir"))?;
+    info!("Found Git repository at: {}", workdir.display());
+
+    // Ensure the input folder_path is absolute for correct prefix matching
+    let absolute_folder_path = fs::canonicalize(folder_path)?;
+
+    let mut tracked_files = Vec::new();
+    let index = repo.index().context("Failed to get repository index")?;
+
+    for entry in index.iter() {
+        // entry.path is relative to the repository root
+        let repo_relative_path = PathBuf::from(String::from_utf8_lossy(&entry.path).as_ref());
+        let absolute_path = workdir.join(&repo_relative_path);
+
+        // Check if the file exists and is within the target folder
+        if absolute_path.is_file() && absolute_path.starts_with(&absolute_folder_path) {
+            // Use canonicalize to ensure consistent path format
+            if let Ok(canonical_path) = fs::canonicalize(&absolute_path) {
+                 tracked_files.push(canonical_path);
+            } else {
+                warn!("Could not canonicalize path for tracked file: {}", absolute_path.display());
+            }
+        }
     }
-    Ok(files)
+
+    if tracked_files.is_empty() {
+        warn!("No tracked files found within the specified folder: {}", folder_path.display());
+    } else {
+        info!("Found {} tracked files in the specified folder.", tracked_files.len());
+    }
+
+    Ok(tracked_files)
 }
+
 
 fn calculate_hash(file_path: &Path) -> Result<String> {
     let mut file = fs::File::open(file_path)
