@@ -145,10 +145,8 @@ async fn main() -> Result<()> {
     // Ensure Qdrant collection exists
     ensure_qdrant_collection(qdrant_client.clone(), &collection_name).await?;
 
-    // Create the text splitter once
-    let text_splitter = create_text_splitter()?;
-
     // --- Process Files ---
+    // Text splitter will be created inside the async task for each file
     info!("Scanning folder: {}", args.folder.display());
     let files_to_scan = scan_folder(&args.folder)?;
     info!("Found {} tracked files to potentially process.", files_to_scan.len());
