@@ -290,75 +290,38 @@ async fn main() -> Result<()> {
         info!("Constructing Qdrant points from embeddings...");
         // The builder returns results in the same order as the input documents
         for (long_document, embedding_result) in embedding_results.into_iter() {
-            // Handle OneOrMany - we expect Many embeddings per document (one per chunk)
-            match embedding_result {
-                OneOrMany::Many(embeddings) => {
-                    debug!("Processing {} embeddings for document '{}'", embeddings.len(), long_document.path_str);
-                    // Iterate through the embeddings for this document's chunks
-                    for (chunk_index, embedding) in embeddings.into_iter().enumerate() {
-                        let chunk_uuid = generate_uuid_for_chunk(&long_document.path_str, chunk_index);
-                        let point_id = uuid_to_point_id(chunk_uuid);
+            // Use into_iter() on OneOrMany, which handles both single and multiple embeddings.
+            // Enumerate to get the chunk_index.
+            let embeddings_count = embedding_result.len(); // Get count for logging if needed
+            debug!("Processing {} embedding(s) for document '{}'", embeddings_count, long_document.path_str);
 
-                        let metadata = FileMetadata {
-                            path: long_document.path_str.clone(),
-                            hash: long_document.current_hash.clone(),
-                            chunk_index, // Use the index from the inner loop
-                        };
-                        let payload: Payload = match serde_json::to_value(metadata) {
-                            Ok(val) => match val.try_into() {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    error!("Failed to convert metadata to Qdrant Payload for chunk {} of {}: {}", chunk_index, long_document.path_str, e);
-                                    continue; // Skip this point
-                                }
-                            },
-                            Err(e) => {
-                                error!("Failed to serialize metadata for chunk {} of {}: {}", chunk_index, long_document.path_str, e);
-                                continue; // Skip this point
-                            }
-                        };
+            for (chunk_index, embedding) in embedding_result.into_iter().enumerate() {
+                let chunk_uuid = generate_uuid_for_chunk(&long_document.path_str, chunk_index);
+                let point_id = uuid_to_point_id(chunk_uuid);
 
-                        let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
-                        let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
-                        let point = PointStruct::new(point_id, vectors, payload);
-                        all_points_to_upsert.push(point);
-                    }
-                }
-                 OneOrMany::One(embedding) => {
-                    // This case is unexpected if the Embed impl splits into chunks.
-                    // It might happen if a document yields exactly one non-empty chunk.
-                    warn!(
-                        "Received only one embedding for document '{}'. Processing as chunk 0.",
-                         long_document.path_str
-                    );
-                    let chunk_index = 0; // Assume it's the first (and only) chunk
-                    let chunk_uuid = generate_uuid_for_chunk(&long_document.path_str, chunk_index);
-                    let point_id = uuid_to_point_id(chunk_uuid);
-
-                    let metadata = FileMetadata {
-                        path: long_document.path_str.clone(),
-                        hash: long_document.current_hash.clone(),
-                        chunk_index,
-                    };
-                     let payload: Payload = match serde_json::to_value(metadata) {
-                        Ok(val) => match val.try_into() {
-                            Ok(p) => p,
-                            Err(e) => {
-                                error!("Failed to convert metadata to Qdrant Payload for single chunk of {}: {}", long_document.path_str, e);
-                                continue; // Skip this point
-                            }
-                        },
+                let metadata = FileMetadata {
+                    path: long_document.path_str.clone(),
+                    hash: long_document.current_hash.clone(),
+                    chunk_index, // Use the index from the enumerate iterator
+                };
+                let payload: Payload = match serde_json::to_value(metadata) {
+                    Ok(val) => match val.try_into() {
+                        Ok(p) => p,
                         Err(e) => {
-                            error!("Failed to serialize metadata for single chunk of {}: {}", long_document.path_str, e);
+                            error!("Failed to convert metadata to Qdrant Payload for chunk {} of {}: {}", chunk_index, long_document.path_str, e);
                             continue; // Skip this point
                         }
-                    };
+                    },
+                    Err(e) => {
+                        error!("Failed to serialize metadata for chunk {} of {}: {}", chunk_index, long_document.path_str, e);
+                        continue; // Skip this point
+                    }
+                };
 
-                    let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
-                    let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
-                    let point = PointStruct::new(point_id, vectors, payload);
-                    all_points_to_upsert.push(point);
-                }
+                let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
+                let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
+                let point = PointStruct::new(point_id, vectors, payload);
+                all_points_to_upsert.push(point);
             }
         }
         info!("Finished constructing {} points.", all_points_to_upsert.len());
