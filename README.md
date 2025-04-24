@@ -46,7 +46,7 @@ You also need an OpenAI API key.
     **Example:** Find files related to "database connection pooling".
 
     ```bash
-    echo "database connection pooling" | groma /path/to/your/repo/subdir --cutoff 0.7
+    echo "database connection pooling" | groma /path/to/your/repo/subdir --cutoff 0.3
     ```
 
     **Arguments:**
