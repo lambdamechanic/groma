@@ -24,3 +24,5 @@ futures = "0.3"
 tabled = "0.15"
 uuid = { version = "1.16.0", features = ["v5"] } # Update UUID and enable v5 for path hashing
 url = "2.5" # For parsing Qdrant URL
+text_splitter = { version = "0.4", features = ["tiktoken-rs"] } # For chunking text by tokens
+tiktoken-rs = "0.5" # Required by text_splitter feature

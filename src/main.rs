@@ -34,6 +34,8 @@ use tabled::{Table, Tabled};
 use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use url::Url;
+use text_splitter::{ChunkConfig, TextSplitter}; // Import TextSplitter
+use tiktoken_rs::cl100k_base; // Import tokenizer for chunk size calculation
 use uuid::Uuid;
 
 const QDRANT_COLLECTION_NAME: &str = "groma-files";
@@ -70,8 +72,9 @@ struct Args {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct FileMetadata {
-    path: String,
-    hash: String,
+    path: String, // Original file path
+    hash: String, // Hash of the entire original file
+    chunk_index: usize, // Index of this chunk within the file
 }
 
 #[derive(Tabled)]
@@ -82,9 +85,10 @@ struct ResultRow {
     path: String,
 }
 
-// Helper to generate a stable UUID based on the file path string
-fn generate_uuid_from_path(path_str: &str) -> Uuid {
-    Uuid::new_v5(&Uuid::NAMESPACE_DNS, path_str.as_bytes())
+// Helper to generate a stable UUID for a specific chunk
+fn generate_uuid_for_chunk(path_str: &str, chunk_index: usize) -> Uuid {
+    let identifier = format!("{}:{}", path_str, chunk_index);
+    Uuid::new_v5(&Uuid::NAMESPACE_DNS, identifier.as_bytes())
 }
 
 // Helper to convert Uuid to Qdrant PointId
@@ -133,56 +137,73 @@ async fn main() -> Result<()> {
     // Ensure Qdrant collection exists
     ensure_qdrant_collection(qdrant_client.clone()).await?;
 
+    // Create the text splitter once
+    let text_splitter = create_text_splitter()?;
+
     // --- Process Files ---
     info!("Scanning folder: {}", args.folder.display());
-    let files_to_process = scan_folder(&args.folder)?;
-    info!("Found {} files to potentially process.", files_to_process.len());
+    let files_to_scan = scan_folder(&args.folder)?;
+    info!("Found {} tracked files to potentially process.", files_to_scan.len());
 
-    let mut points_to_upsert: Vec<PointStruct> = Vec::new();
-    let mut processed_count = 0;
+    let mut all_points_to_upsert: Vec<PointStruct> = Vec::new();
+    let mut total_processed_files = 0;
+    let mut total_skipped_files = 0;
+    let mut total_failed_files = 0;
 
-    for file_path in files_to_process {
+    for file_path in files_to_scan {
         let path_str = file_path.to_string_lossy().to_string();
-        let point_uuid = generate_uuid_from_path(&path_str);
-        let point_id = uuid_to_point_id(point_uuid);
 
+        // Pass the text_splitter reference to process_file
         match process_file(
             qdrant_client.clone(),
             embedding_model.clone(),
+            &text_splitter, // Pass splitter reference
             &file_path,
             &path_str,
-            point_id.clone(),
         )
         .await
         {
-            Ok(Some(point)) => {
-                points_to_upsert.push(point);
-                if points_to_upsert.len() >= QDRANT_UPSERT_BATCH_SIZE {
-                    upsert_batch(qdrant_client.clone(), &points_to_upsert).await?;
-                    processed_count += points_to_upsert.len();
-                    info!("Upserted {} points...", processed_count);
-                    points_to_upsert.clear();
+            Ok(new_points) => {
+                if new_points.is_empty() {
+                    // File was skipped (up-to-date or empty)
+                    total_skipped_files += 1;
+                } else {
+                    // File was processed, add its points to the main list
+                    total_processed_files += 1;
+                    all_points_to_upsert.extend(new_points);
+
+                    // Check if the accumulated batch is large enough to upsert
+                    if all_points_to_upsert.len() >= QDRANT_UPSERT_BATCH_SIZE {
+                        info!(
+                            "Upserting batch of {} points...",
+                            all_points_to_upsert.len()
+                        );
+                        upsert_batch(qdrant_client.clone(), &all_points_to_upsert).await?;
+                        all_points_to_upsert.clear();
+                    }
                 }
-            }
-            Ok(None) => {
-                // File is up-to-date, skip
-                debug!("Skipping up-to-date file: {}", path_str);
             }
             Err(e) => {
                 warn!("Failed to process file {}: {}", path_str, e);
+                total_failed_files += 1;
             }
         }
     }
 
     // Upsert any remaining points
-    if !points_to_upsert.is_empty() {
-        upsert_batch(qdrant_client.clone(), &points_to_upsert).await?;
-        processed_count += points_to_upsert.len();
-        info!("Upserted final {} points. Total processed: {}", points_to_upsert.len(), processed_count);
-        points_to_upsert.clear();
+    if !all_points_to_upsert.is_empty() {
+        info!(
+            "Upserting final batch of {} points...",
+            all_points_to_upsert.len()
+        );
+        upsert_batch(qdrant_client.clone(), &all_points_to_upsert).await?;
+        all_points_to_upsert.clear();
     }
 
-    info!("File processing complete.");
+    info!(
+        "File processing complete. Processed: {}, Skipped: {}, Failed: {}",
+        total_processed_files, total_skipped_files, total_failed_files
+    );
 
     // --- Read Query from Stdin ---
     info!("Please enter your query and press Enter (or Ctrl+D to finish):");
@@ -218,34 +239,62 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to search Qdrant")?;
 
-    info!("Found {} potential matches.", search_result.result.len());
+    info!(
+        "Found {} potential matching chunks.",
+        search_result.result.len()
+    );
 
-    // --- Format and Print Results ---
-    let mut results: Vec<ResultRow> = search_result
-        .result
+    // --- Aggregate Results by File Path ---
+    use std::collections::HashMap;
+
+    let mut file_scores: HashMap<String, f32> = HashMap::new();
+
+    for hit in search_result.result {
+        if let Some(path_val) = hit.payload.get("path") {
+            if let Some(path_str) = path_val.as_str() {
+                let score = hit.score;
+                // Insert or update the score, keeping the highest one
+                file_scores
+                    .entry(path_str.to_string())
+                    .and_modify(|e| *e = e.max(score))
+                    .or_insert(score);
+            }
+        }
+    }
+
+    // --- Format and Print Aggregated Results ---
+    let mut aggregated_results: Vec<ResultRow> = file_scores
         .into_iter()
-        .filter_map(|hit| {
-            let score = hit.score;
-            let payload = hit.payload;
-            // Extract path from payload
-            payload.get("path").and_then(|v| v.as_str()).map(|path_str| ResultRow {
-                score,
-                path: path_str.to_string(),
-            })
-        })
+        .map(|(path, score)| ResultRow { score, path })
         .collect();
 
-    // Qdrant search results are already sorted by score descending
-    // results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort by score descending
+    aggregated_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
-    if results.is_empty() {
+
+    if aggregated_results.is_empty() {
         info!("No files found matching the query with cutoff {}", args.cutoff);
     } else {
-        println!("{}", Table::new(results));
+        info!("Aggregated results by file (showing highest score per file):");
+        println!("{}", Table::new(aggregated_results));
     }
 
     Ok(())
 }
+
+// Helper function to create a text splitter configured for token-based chunking
+fn create_text_splitter() -> Result<TextSplitter<impl Fn(&str) -> usize>> {
+    let tokenizer = cl100k_base().context("Failed to load cl100k_base tokenizer")?;
+    // Aim for chunks of ~512 tokens, with some overlap. Max size 8191 for safety.
+    let chunk_config = ChunkConfig::new(512)
+        .with_overlap(50)
+        .with_max_chunk_size_chars(8191 * 4) // Estimate max chars as safety net
+        .with_trim(true); // Trim whitespace
+
+    // Use the tokenizer to count tokens for chunk size
+    Ok(TextSplitter::new(chunk_config, move |text| tokenizer.encode_with_special_tokens(text).len()))
+}
+
 
 // Update function signature to use new Qdrant client type
 async fn ensure_qdrant_collection(client: Arc<Qdrant>) -> Result<()> {
@@ -332,24 +381,24 @@ fn calculate_hash(file_path: &Path) -> Result<String> {
         .with_context(|| format!("Failed to read file for hashing: {}", file_path.display()))?;
     let hash_bytes = hasher.finalize();
     Ok(hex::encode(hash_bytes))
-}
+use qdrant_client::qdrant::{Condition, Filter, FieldCondition, Match, MatchValue, PointsSelector, DeletePointsBuilder}; // Imports for filtering/deleting
 
-// Update function signature to use new Qdrant client type
-async fn get_existing_hash(client: Arc<Qdrant>, point_id: PointId) -> Result<Option<String>> {
-    // Use new get_points method with builder
-    let get_points_req = GetPointsBuilder::new(QDRANT_COLLECTION_NAME, vec![point_id])
-        // Use PayloadIncludeSelector directly for with_payload, using the correct field name 'fields'
-        .with_payload(PayloadIncludeSelector {
-            fields: vec!["hash".to_string()],
-        })
-        .with_vectors(false); // Don't need vectors for this check
+// Fetches the hash of *one* existing chunk for a given file path.
+async fn get_existing_file_hash(client: Arc<Qdrant>, path_str: &str) -> Result<Option<String>> {
+    let filter = Filter::must([Condition::matches(
+        "path", // Field name in payload
+        Match::new().value(MatchValue::Keyword(path_str.to_string())),
+    )]);
 
-    let points_response = client.get_points(get_points_req).await?;
+    // Use search instead of get, limit to 1, only fetch hash payload
+    let search_req = SearchPointsBuilder::new(QDRANT_COLLECTION_NAME, vec![0.0; EMBEDDING_DIMENSION as usize], 1) // Dummy vector, limit 1
+        .filter(filter)
+        .with_payload(PayloadIncludeSelector { fields: vec!["hash".to_string()] })
+        .with_vectors(false);
 
-    // Process the response which is Vec<RetrievedPoint>
-    // point.payload is HashMap<String, Value>, not Option<Payload>
-    if let Some(point) = points_response.result.into_iter().next() {
-        // Access the "hash" field directly using get() on the payload HashMap
+    let search_result = client.search_points(search_req).await?;
+
+    if let Some(point) = search_result.result.into_iter().next() {
         if let Some(hash_value) = point.payload.get("hash") {
             return Ok(hash_value.as_str().map(String::from));
         }
@@ -357,71 +406,122 @@ async fn get_existing_hash(client: Arc<Qdrant>, point_id: PointId) -> Result<Opt
     Ok(None)
 }
 
-// Make function generic over the EmbeddingModel trait to avoid object safety issues
+// Deletes all points associated with a specific file path using a filter.
+async fn delete_points_by_path(client: Arc<Qdrant>, path_str: &str) -> Result<()> {
+    info!("Deleting existing chunks for file: {}", path_str);
+    let filter = Filter::must([Condition::matches(
+        "path",
+        Match::new().value(MatchValue::Keyword(path_str.to_string())),
+    )]);
+
+    let points_selector = PointsSelector::Filter(filter); // Select points based on the filter
+
+    // Use DeletePointsBuilder
+    client
+        .delete_points(
+            DeletePointsBuilder::new(QDRANT_COLLECTION_NAME, points_selector)
+            // .wait(true) // Optionally wait
+        )
+        .await?;
+    Ok(())
+}
+
+
+// Processes a single file: checks hash, deletes old chunks if needed,
+// chunks content, embeds chunks, and returns points to be upserted.
 async fn process_file<E>(
     qdrant_client: Arc<Qdrant>,
-    embedding_model: Arc<E>, // Use generic type E
+    embedding_model: Arc<E>,
+    text_splitter: &TextSplitter<impl Fn(&str) -> usize>, // Pass splitter reference
     file_path: &Path,
     path_str: &str,
-    point_id: PointId,
-) -> Result<Option<PointStruct>>
+) -> Result<Vec<PointStruct>> // Return Vec instead of Option
 where
-    E: EmbeddingModel + Send + Sync + 'static, // Add bounds required for async/Arc
+    E: EmbeddingModel + Send + Sync + 'static,
 {
-    debug!("Processing: {}", path_str);
+    debug!("Processing file: {}", path_str);
     let current_hash = calculate_hash(file_path)?;
-    let existing_hash = get_existing_hash(qdrant_client.clone(), point_id.clone()).await?;
+    let existing_hash = get_existing_file_hash(qdrant_client.clone(), path_str).await?;
 
     if Some(&current_hash) == existing_hash.as_ref() {
-        // Hashes match, file is up-to-date
-        return Ok(None);
+        debug!("File hash matches, skipping: {}", path_str);
+        return Ok(Vec::new()); // Return empty vec, no points to upsert
     }
 
-    info!("Hashing difference detected or file is new. Embedding: {}", path_str);
+    info!(
+        "File is new or hash changed. Processing and embedding chunks for: {}",
+        path_str
+    );
 
-    // Read file content
+    // If hash differs or file is new, delete existing points for this path
+    if existing_hash.is_some() {
+        delete_points_by_path(qdrant_client.clone(), path_str).await?;
+    }
+
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file content: {}", file_path.display()))?;
 
     if content.trim().is_empty() {
         warn!("Skipping empty file: {}", path_str);
-        // Optionally delete from Qdrant if it exists?
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
-    // Generate embedding using embed_text
-    // Handle potential errors during embedding
-    // Pass content as a slice (&str) instead of String
-    let embedding = match embedding_model.embed_text(&content).await {
-        Ok(emb) => emb,
-        Err(e) => {
-            error!("Failed to embed file {}: {}", path_str, e);
-            // Decide how to handle embedding errors: skip file, retry, etc.
-            // For now, we skip the file by returning Ok(None) or an error
-            return Err(anyhow!("Embedding failed for {}: {}", path_str, e));
+    // Chunk the content using the text splitter
+    let chunks: Vec<&str> = text_splitter.chunks(&content).collect();
+    info!("Split '{}' into {} chunks.", path_str, chunks.len());
+
+    let mut points_to_upsert = Vec::with_capacity(chunks.len());
+
+    // Embed chunks in batches for efficiency
+    let chunk_batches = chunks.chunks(BATCH_SIZE); // Use BATCH_SIZE defined earlier
+
+    for (batch_index, text_batch) in chunk_batches.enumerate() {
+        debug!("Embedding batch {} for file {}", batch_index, path_str);
+        // Use embed_texts for batching
+        let embeddings = match embedding_model.embed_texts(text_batch).await {
+             Ok(embs) => embs,
+             Err(e) => {
+                 error!("Failed to embed batch {} for file {}: {}", batch_index, path_str, e);
+                 // Skip this batch, or potentially the whole file? For now, skip batch.
+                 continue; // Or return Err(...) if one batch failure should stop the file processing
+             }
+         };
+
+        // Create points for the successful batch
+        for (i, embedding) in embeddings.into_iter().enumerate() {
+            let chunk_index = batch_index * BATCH_SIZE + i; // Calculate overall chunk index
+            let chunk_uuid = generate_uuid_for_chunk(path_str, chunk_index);
+            let point_id = uuid_to_point_id(chunk_uuid);
+
+            let metadata = FileMetadata {
+                path: path_str.to_string(),
+                hash: current_hash.clone(), // Use the hash of the whole file
+                chunk_index,
+            };
+            let payload: Payload = match serde_json::to_value(metadata) {
+                Ok(val) => match val.try_into() {
+                     Ok(p) => p,
+                     Err(e) => {
+                         error!("Failed to convert metadata to Qdrant Payload for chunk {} of {}: {}", chunk_index, path_str, e);
+                         continue; // Skip this chunk
+                     }
+                 },
+                 Err(e) => {
+                     error!("Failed to serialize metadata for chunk {} of {}: {}", chunk_index, path_str, e);
+                     continue; // Skip this chunk
+                 }
+             };
+
+
+            let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
+            let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
+            let point = PointStruct::new(point_id, vectors, payload);
+            points_to_upsert.push(point);
         }
-    };
+    }
 
 
-    // Prepare metadata payload
-    let metadata = FileMetadata {
-        path: path_str.to_string(),
-        hash: current_hash,
-    };
-    // Convert metadata directly to Qdrant Payload type
-    let payload: Payload = serde_json::to_value(metadata)?
-        .try_into()
-        .map_err(|e| anyhow!("Failed to convert metadata to Qdrant Payload: {}", e))?;
-
-    // Create Qdrant point
-    // Convert Vec<f64> to Vec<f32> as Qdrant client expects f32
-    // Use the correct field name 'vec' for the embedding vector
-    let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
-    // Explicitly convert Vec<f32> to qdrant::Vectors
-    let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
-    let point = PointStruct::new(point_id, vectors, payload);
-
-    Ok(Some(point))
+    Ok(points_to_upsert)
 }
 
 // Update function signature to use new Qdrant client type
