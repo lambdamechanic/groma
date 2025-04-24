@@ -620,8 +620,14 @@ where
             let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
             let point = PointStruct::new(point_id, vectors, payload);
             points_to_upsert.push(point);
+                }
+            }
+            Err(_) => {
+                // Error already logged inside the future, just continue
+                continue;
+            }
         }
-    }
+    } // <-- Add missing closing brace for the `for result in embedding_results` loop
 
 
     Ok(points_to_upsert)
