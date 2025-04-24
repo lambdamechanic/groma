@@ -381,6 +381,8 @@ fn calculate_hash(file_path: &Path) -> Result<String> {
         .with_context(|| format!("Failed to read file for hashing: {}", file_path.display()))?;
     let hash_bytes = hasher.finalize();
     Ok(hex::encode(hash_bytes))
+} // <-- Added missing closing brace
+
 use qdrant_client::qdrant::{Condition, Filter, FieldCondition, Match, MatchValue, PointsSelector, DeletePointsBuilder}; // Imports for filtering/deleting
 
 // Fetches the hash of *one* existing chunk for a given file path.
