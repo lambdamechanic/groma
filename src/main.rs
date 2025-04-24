@@ -13,7 +13,12 @@ use qdrant_client::{
 };
 // Use the main `rig` crate
 use rig::{
-    embeddings::{embedding::EmbeddingModel, EmbeddingsBuilder}, // Import the trait and builder
+    embeddings::{
+        embed::{Embed, EmbedError, TextEmbedder}, // Import Embed trait and helpers
+        embedding::EmbeddingModel,
+        EmbeddingsBuilder, // Import the trait and builder
+        OneOrMany, // Import OneOrMany for handling embedding results
+    },
     // Removed unused Embeddings
     // Removed unused vector_store imports (Point, PointData, VectorStoreIndex)
     providers::openai, // Import the openai provider module
@@ -77,7 +82,48 @@ struct FileMetadata {
     path: String, // Original file path
     hash: String, // Hash of the entire original file
     chunk_index: usize, // Index of this chunk within the file
+    // Removed text field as it's not stored in Qdrant payload
 }
+
+// Struct to hold file content and metadata, implementing the Embed trait
+#[derive(Debug)]
+struct LongDocument<'a> {
+    path_str: String,
+    current_hash: String,
+    content: String,
+    text_splitter: &'a TextSplitter<CoreBPE>, // Reference to the splitter
+}
+
+// Implement the Embed trait for LongDocument
+// This tells the EmbeddingsBuilder how to get the text pieces to embed from our struct
+impl<'a> Embed for LongDocument<'a> {
+    fn embed(&self, embedder: &mut TextEmbedder) -> Result<(), EmbedError> {
+        const TARGET_CHUNK_SIZE_TOKENS: usize = 512; // Define chunk size here or pass it in
+
+        // Use the text_splitter reference to chunk the content
+        let chunks = self
+            .text_splitter
+            .chunks(&self.content, TARGET_CHUNK_SIZE_TOKENS);
+
+        let mut chunk_count = 0;
+        // Add each chunk's text to the embedder
+        for chunk in chunks {
+            if !chunk.trim().is_empty() {
+                embedder.embed(chunk.to_string()); // Pass ownership of the string chunk
+                chunk_count += 1;
+            }
+        }
+
+        // Log if a document resulted in zero chunks after trimming
+        if chunk_count == 0 {
+             warn!("Document '{}' resulted in 0 non-empty chunks after splitting.", self.path_str);
+        }
+
+
+        Ok(())
+    }
+}
+
 
 // Removed ResultRow struct as it's no longer needed for tabled output
 
@@ -152,53 +198,177 @@ async fn main() -> Result<()> {
     let files_to_scan = scan_folder(&args.folder)?;
     info!("Found {} tracked files to potentially process.", files_to_scan.len());
 
-    let mut all_points_to_upsert: Vec<PointStruct> = Vec::new();
+    let mut documents_to_embed: Vec<LongDocument> = Vec::new();
     let mut total_processed_files = 0;
     let mut total_skipped_files = 0;
     let mut total_failed_files = 0;
+    let mut files_requiring_processing = 0;
 
-    info!("Processing {} files sequentially...", files_to_scan.len());
+    info!("Scanning files for changes and collecting content...");
 
-    // Process files sequentially
+    // --- Phase 1: Scan files, check hashes, collect documents ---
     for file_path in files_to_scan {
         let path_str = file_path.to_string_lossy().to_string();
         let path_str_clone = path_str.clone(); // Clone for error reporting
 
-        match process_file(
-            qdrant_client.clone(),
-            embedding_model.clone(),
-            &text_splitter, // Pass the pre-created splitter reference
-            &file_path,
-            &path_str,
-            &collection_name,
-        )
-        .await
-        {
-            Ok(new_points) => {
-                if new_points.is_empty() {
-                    // File was skipped (up-to-date or empty)
-                    debug!("File skipped (up-to-date or empty): {}", path_str);
-                    total_skipped_files += 1;
-                } else {
-                    // File was processed, add its points to the main list
-                    debug!("Successfully processed file: {}", path_str);
+        match async { // Wrap file processing logic in an async block to handle errors easily
+            debug!("Checking file: {}", path_str);
+            let current_hash = calculate_hash(&file_path)?;
+            let existing_hash = get_existing_file_hash(qdrant_client.clone(), &collection_name, &path_str).await?;
+
+            if Some(&current_hash) == existing_hash.as_ref() {
+                debug!("File hash matches, skipping: {}", path_str);
+                return Ok(false); // Indicate file was skipped
+            }
+
+            info!(
+                "File is new or hash changed. Preparing content for: {}",
+                path_str
+            );
+            files_requiring_processing += 1; // Count files that will be processed
+
+            // If hash differs or file is new, delete existing points for this path
+            if existing_hash.is_some() {
+                delete_points_by_path(qdrant_client.clone(), &collection_name, &path_str).await?;
+            }
+
+            let content = fs::read_to_string(&file_path)
+                .with_context(|| format!("Failed to read file content: {}", file_path.display()))?;
+
+            if content.trim().is_empty() {
+                warn!("Skipping empty file: {}", path_str);
+                // Even if empty, it might have had old points deleted. Count as skipped.
+                return Ok(false); // Indicate file was skipped (empty)
+            }
+
+            // Create LongDocument with content and metadata
+            documents_to_embed.push(LongDocument {
+                path_str: path_str.clone(),
+                current_hash,
+                content,
+                text_splitter: &text_splitter, // Pass reference to the splitter
+            });
+
+            Ok(true) // Indicate file was processed (content collected)
+        }.await {
+            Ok(processed) => {
+                if processed {
                     total_processed_files += 1;
-                    all_points_to_upsert.extend(new_points);
+                } else {
+                    total_skipped_files += 1;
                 }
             }
-            Err(e) => {
-                warn!("Failed to process file {}: {}", path_str_clone, e);
+            Err::<bool, anyhow::Error>(e) => { // Specify types for turbofish
+                warn!("Failed initial processing for file {}: {}", path_str_clone, e);
                 total_failed_files += 1;
             }
         }
     }
 
-    info!(
-        "File processing complete. Processed: {}, Skipped (up-to-date/empty): {}, Failed: {}",
-        total_processed_files, total_skipped_files, total_failed_files
+     info!(
+        "File scanning complete. Files needing processing: {}, Skipped (up-to-date/empty): {}, Failed initial scan: {}",
+        files_requiring_processing, total_skipped_files, total_failed_files
     );
 
-    // --- Batch Upsert All Collected Points ---
+    let mut all_points_to_upsert: Vec<PointStruct> = Vec::new();
+
+    // --- Phase 2: Batch Embed Collected Documents ---
+    if !documents_to_embed.is_empty() {
+        info!("Starting batch embedding for {} documents...", documents_to_embed.len());
+
+        // Use EmbeddingsBuilder with the collected LongDocument instances
+        // The builder will call the `Embed` trait implementation on each document
+        let embedding_results = EmbeddingsBuilder::new((*embedding_model).clone())
+            .documents(documents_to_embed)? // Pass the Vec<LongDocument>
+            .build()
+            .await
+            .context("Failed to generate embeddings using EmbeddingsBuilder")?;
+
+        info!("Successfully generated embeddings."); // Builder handles internal chunking/batching
+
+        // --- Phase 3: Process Embedding Results and Create Points ---
+        info!("Constructing Qdrant points from embeddings...");
+        // The builder returns results in the same order as the input documents
+        for (long_document, embedding_result) in embedding_results.into_iter() {
+            // Handle OneOrMany - we expect Many embeddings per document (one per chunk)
+            match embedding_result {
+                OneOrMany::Many(embeddings) => {
+                    debug!("Processing {} embeddings for document '{}'", embeddings.len(), long_document.path_str);
+                    // Iterate through the embeddings for this document's chunks
+                    for (chunk_index, embedding) in embeddings.into_iter().enumerate() {
+                        let chunk_uuid = generate_uuid_for_chunk(&long_document.path_str, chunk_index);
+                        let point_id = uuid_to_point_id(chunk_uuid);
+
+                        let metadata = FileMetadata {
+                            path: long_document.path_str.clone(),
+                            hash: long_document.current_hash.clone(),
+                            chunk_index, // Use the index from the inner loop
+                        };
+                        let payload: Payload = match serde_json::to_value(metadata) {
+                            Ok(val) => match val.try_into() {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    error!("Failed to convert metadata to Qdrant Payload for chunk {} of {}: {}", chunk_index, long_document.path_str, e);
+                                    continue; // Skip this point
+                                }
+                            },
+                            Err(e) => {
+                                error!("Failed to serialize metadata for chunk {} of {}: {}", chunk_index, long_document.path_str, e);
+                                continue; // Skip this point
+                            }
+                        };
+
+                        let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
+                        let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
+                        let point = PointStruct::new(point_id, vectors, payload);
+                        all_points_to_upsert.push(point);
+                    }
+                }
+                 OneOrMany::One(embedding) => {
+                    // This case is unexpected if the Embed impl splits into chunks.
+                    // It might happen if a document yields exactly one non-empty chunk.
+                    warn!(
+                        "Received only one embedding for document '{}'. Processing as chunk 0.",
+                         long_document.path_str
+                    );
+                    let chunk_index = 0; // Assume it's the first (and only) chunk
+                    let chunk_uuid = generate_uuid_for_chunk(&long_document.path_str, chunk_index);
+                    let point_id = uuid_to_point_id(chunk_uuid);
+
+                    let metadata = FileMetadata {
+                        path: long_document.path_str.clone(),
+                        hash: long_document.current_hash.clone(),
+                        chunk_index,
+                    };
+                     let payload: Payload = match serde_json::to_value(metadata) {
+                        Ok(val) => match val.try_into() {
+                            Ok(p) => p,
+                            Err(e) => {
+                                error!("Failed to convert metadata to Qdrant Payload for single chunk of {}: {}", long_document.path_str, e);
+                                continue; // Skip this point
+                            }
+                        },
+                        Err(e) => {
+                            error!("Failed to serialize metadata for single chunk of {}: {}", long_document.path_str, e);
+                            continue; // Skip this point
+                        }
+                    };
+
+                    let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
+                    let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
+                    let point = PointStruct::new(point_id, vectors, payload);
+                    all_points_to_upsert.push(point);
+                }
+            }
+        }
+        info!("Finished constructing {} points.", all_points_to_upsert.len());
+
+    } else {
+        info!("No documents require embedding.");
+    }
+
+
+    // --- Phase 4: Batch Upsert All Collected Points ---
     if !all_points_to_upsert.is_empty() {
         info!(
             "Starting batch upsert of {} total points to collection '{}'...",
@@ -501,135 +671,7 @@ async fn delete_points_by_path(client: Arc<Qdrant>, collection_name: &str, path_
 
     client.delete_points(delete_request).await?; // Pass the constructed struct
     Ok(())
-}
-
-
-// Processes a single file: checks hash, deletes old chunks if needed,
-// chunks content, embeds chunks, and returns points to be upserted.
-// Update function signature to use the concrete TextSplitter<CoreBPE> type
-async fn process_file<E>(
-    qdrant_client: Arc<Qdrant>,
-    embedding_model: Arc<E>,
-    text_splitter: &TextSplitter<CoreBPE>, // Use concrete CoreBPE type
-    file_path: &Path,
-    path_str: &str,
-    collection_name: &str, // Add collection_name parameter
-) -> Result<Vec<PointStruct>> // Return Vec instead of Option
-where
-    E: EmbeddingModel + Send + Sync + 'static,
-{
-    debug!("Processing file: {} for collection {}", path_str, collection_name);
-    let current_hash = calculate_hash(file_path)?;
-    // Pass collection_name to get_existing_file_hash
-    let existing_hash = get_existing_file_hash(qdrant_client.clone(), collection_name, path_str).await?;
-
-    if Some(&current_hash) == existing_hash.as_ref() {
-        debug!("File hash matches, skipping: {} in collection {}", path_str, collection_name);
-        return Ok(Vec::new()); // Return empty vec, no points to upsert
-    }
-
-    info!(
-        "File is new or hash changed. Processing and embedding chunks for: {}",
-        path_str
-    );
-
-    // If hash differs or file is new, delete existing points for this path
-    if existing_hash.is_some() {
-        // Pass collection_name to delete_points_by_path
-        delete_points_by_path(qdrant_client.clone(), collection_name, path_str).await?;
-    }
-
-    let content = fs::read_to_string(file_path)
-        .with_context(|| format!("Failed to read file content: {}", file_path.display()))?;
-
-    if content.trim().is_empty() {
-        warn!("Skipping empty file: {}", path_str);
-        return Ok(Vec::new());
-    }
-
-    // Chunk the content using the text splitter's token-based chunks method
-    // Pass the desired chunk size (in tokens) here.
-    const TARGET_CHUNK_SIZE_TOKENS: usize = 512;
-    // Removed duplicate definition of TARGET_CHUNK_SIZE_TOKENS
-    let chunks: Vec<&str> = text_splitter.chunks(&content, TARGET_CHUNK_SIZE_TOKENS).collect();
-    info!("Split '{}' into {} chunks (target size: {} tokens).", path_str, chunks.len(), TARGET_CHUNK_SIZE_TOKENS);
-
-    if chunks.is_empty() {
-        warn!("No text chunks generated for file: {}", path_str);
-        return Ok(Vec::new());
-    }
-
-    // Convert chunks to Strings for the EmbeddingsBuilder
-    let chunk_strings: Vec<String> = chunks.iter().map(|&s| s.to_string()).collect();
-
-    // Use EmbeddingsBuilder for batching and parallelism
-    debug!("Generating embeddings for {} chunks using EmbeddingsBuilder...", chunk_strings.len());
-    // Clone the model *inside* the Arc, as EmbeddingsBuilder expects the model itself.
-    let embedding_results = EmbeddingsBuilder::new((*embedding_model).clone())
-        .documents(chunk_strings)? // Pass owned Strings
-        .build()
-        .await
-        .context("Failed to generate embeddings using EmbeddingsBuilder")?;
-
-    info!("Successfully generated embeddings for {} chunks.", embedding_results.len());
-
-    let mut points_to_upsert = Vec::with_capacity(embedding_results.len());
-
-    // Process results from EmbeddingsBuilder
-    for (chunk_index, (_original_text, embedding_result)) in embedding_results.into_iter().enumerate() {
-        // Check if the result contains one or multiple embeddings
-        if embedding_result.len() == 1 {
-            // Get the single embedding using first() (requires Embedding to be Clone)
-            let embedding = embedding_result.first();
-
-            let chunk_uuid = generate_uuid_for_chunk(path_str, chunk_index);
-            let point_id = uuid_to_point_id(chunk_uuid);
-
-            let metadata = FileMetadata {
-                path: path_str.to_string(),
-                hash: current_hash.clone(), // Use the hash of the whole file
-                chunk_index,
-            };
-            let payload: Payload = match serde_json::to_value(metadata) {
-                Ok(val) => match val.try_into() {
-                     Ok(p) => p,
-                     Err(e) => {
-                         error!("Failed to convert metadata to Qdrant Payload for chunk {} of {}: {}", chunk_index, path_str, e);
-                         continue; // Skip this chunk
-                     }
-                 },
-                 Err(e) => {
-                     error!("Failed to serialize metadata for chunk {} of {}: {}", chunk_index, path_str, e);
-                     continue; // Skip this chunk
-                 }
-             };
-
-                let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
-                let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
-                let point = PointStruct::new(point_id, vectors, payload);
-                points_to_upsert.push(point);
-        } else { // len > 1 (cannot be 0 based on OneOrMany guarantees)
-            // This case might occur if the model returns multiple embeddings per document.
-            // The current behavior is to warn and skip.
-            warn!(
-                "Received multiple embeddings ({}) for chunk {} of file {}. Skipping.",
-                embedding_result.len(), chunk_index, path_str
-            );
-            // If handling multiple embeddings is desired, iterate through embedding_result:
-            /*
-            for (sub_index, embedding) in embedding_result.into_iter().enumerate() {
-                // Need a way to generate a unique ID for each sub-chunk embedding
-                // Example: let sub_chunk_uuid = generate_uuid_for_chunk(&format!("{}:{}", path_str, chunk_index), sub_index);
-                // let point_id = uuid_to_point_id(sub_chunk_uuid);
-                // ... create point logic similar to the single embedding case ...
-            }
-            */
-            continue;
-        }
-    }
-
-    Ok(points_to_upsert)
-}
+// Removed process_file function as its logic is now integrated into the main loop phases
 
 // Update function signature to accept collection_name
 async fn upsert_batch(client: Arc<Qdrant>, collection_name: &str, points: &[PointStruct]) -> Result<()> {
