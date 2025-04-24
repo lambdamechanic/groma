@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rig-core = "0.11"
+rig-core = "0.11.1" # Update to latest patch
 # rig-openrouter = "0.11" # Removed - OpenRouter is part of rig-core
-rig-qdrant = "0.1"     # Check for the latest compatible version
-qdrant-client = "1.8"  # Check for the latest compatible version with rig-qdrant
+rig-qdrant = "0.1.12"    # Update to latest patch compatible with rig-core 0.11
+qdrant-client = "1.14.0" # Update to the version used in rig-qdrant examples
 clap = { version = "4.4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 sha2 = "0.10"
@@ -20,5 +20,5 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures = "0.3"
 tabled = "0.15"
-uuid = { version = "1.7", features = ["v4"] } # For generating point IDs
+uuid = { version = "1.16.0", features = ["v5"] } # Update UUID and enable v5 for path hashing
 url = "2.5" # For parsing Qdrant URL

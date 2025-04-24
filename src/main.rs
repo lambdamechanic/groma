@@ -1,22 +1,24 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use futures::stream::{StreamExt, TryStreamExt};
-// Use the correct, nested path for QdrantClient
-use qdrant_client::client::QdrantClient;
-use qdrant_client::qdrant::{
-    point_id::PointIdOptions, // Correct path for PointIdVariant/Options
-    vectors_config::Config, CreateCollection, Distance, PointStruct, VectorParams,
-    VectorsConfig, PointId, WithPayloadSelector, SearchPoints, // Removed PayloadSelector
-    with_payload_selector, // Import the module for SelectorOptions::Include
-    PayloadSelector, // Keep PayloadSelector import for get_existing_hash usage
+// Use the new Qdrant client struct and builder patterns
+use qdrant_client::{
+    payload::Payload, // Import Payload struct directly
+    qdrant::{
+        point_id::PointIdOptions, vectors_config::Config, CreateCollectionBuilder, Distance,
+        GetPointsBuilder, PointStruct, QueryPointsBuilder, SearchPointsBuilder, VectorParams,
+        VectorsConfig, PointId, WithPayloadSelector, with_payload_selector, // Keep for SelectorOptions::Include
+        UpsertPointsBuilder, // Import UpsertPointsBuilder
+        PayloadSelector, // Import PayloadSelector directly
+    },
+    Qdrant, // Use the new Qdrant struct
 };
 use rig_core::{
-    embeddings::{embedding::EmbeddingModel, Embeddings},
-    vector_store::{VectorStoreIndex, Point, PointData}, // Keep VectorStoreIndex for rig trait usage if needed later
+    embeddings::{embedding::EmbeddingModel, Embeddings, EmbeddingsBuilder}, // Add EmbeddingsBuilder
+    vector_store::{VectorStoreIndex, Point, PointData},
     providers::openrouter::OpenRouterProvider,
 };
-// use rig_openrouter::OpenRouterProvider; // Removed incorrect use statement
-// Removed unused import: use rig_qdrant::QdrantVectorStore;
+use rig_qdrant::QdrantVectorStore; // Re-add QdrantVectorStore import
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -119,8 +121,8 @@ async fn main() -> Result<()> {
         args.openrouter_model, EMBEDDING_DIMENSION
     );
 
-    // Qdrant Client (use non-deprecated path and builder)
-    let qdrant_client = Arc::new(QdrantClient::new(Some(args.qdrant_url.to_string()))?);
+    // Qdrant Client (use new Qdrant struct and builder)
+    let qdrant_client = Arc::new(Qdrant::from_url(&args.qdrant_url.to_string()).build()?);
     info!("Connected to Qdrant at {}", args.qdrant_url);
 
     // Ensure Qdrant collection exists
@@ -197,18 +199,13 @@ async fn main() -> Result<()> {
 
     // --- Search Qdrant ---
     info!("Searching for relevant files...");
+    // Use the builder pattern for search_points
     let search_result = qdrant_client
-        .search_points(&SearchPoints {
-            collection_name: QDRANT_COLLECTION_NAME.to_string(),
-            vector: query_embedding.vector.into(),
-            limit: 100, // Adjust as needed
-            with_payload: Some(WithPayloadSelector { // Keep using Enable(true) to get all payload
-                selector_options: Some(with_payload_selector::SelectorOptions::Enable(true)),
-            }),
-            score_threshold: Some(args.cutoff), // Apply cutoff directly in Qdrant search
-            // No changes needed below for search_points as its signature seems stable enough
-            ..Default::default()
-        })
+        .search_points(
+            SearchPointsBuilder::new(QDRANT_COLLECTION_NAME, query_embedding.vector.into(), 100) // collection, vector, limit
+                .with_payload(true) // Request payload
+                .score_threshold(args.cutoff), // Apply cutoff
+        )
         .await
         .context("Failed to search Qdrant")?;
 
@@ -241,9 +238,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-// Update function signature to use non-deprecated client type
-async fn ensure_qdrant_collection(client: Arc<QdrantClient>) -> Result<()> {
-    // Use non-deprecated list_collections method
+// Update function signature to use new Qdrant client type
+async fn ensure_qdrant_collection(client: Arc<Qdrant>) -> Result<()> {
+    // Use new list_collections method
     let collections_list = client.list_collections().await?;
     if !collections_list
         .collections
@@ -251,21 +248,18 @@ async fn ensure_qdrant_collection(client: Arc<QdrantClient>) -> Result<()> {
         .any(|c| c.name == QDRANT_COLLECTION_NAME)
     {
         info!("Collection '{}' not found. Creating...", QDRANT_COLLECTION_NAME);
-        // Use non-deprecated create_collection method
+        // Use new create_collection method with builder
         client
-            .create_collection(&CreateCollection {
-                collection_name: QDRANT_COLLECTION_NAME.to_string(),
-                vectors_config: Some(VectorsConfig {
-                    config: Some(Config::Params(VectorParams {
+            .create_collection(
+                CreateCollectionBuilder::new(QDRANT_COLLECTION_NAME)
+                    .vectors_config(VectorsConfig::from(VectorParams {
                         size: EMBEDDING_DIMENSION,
                         distance: Distance::Cosine.into(),
                         ..Default::default()
-                    })),
-                }),
-                // Add payload indexing for faster filtering/lookup if needed, especially on 'path' or 'hash'
-                // payload_schema: todo!(), // Consider adding schema for path/hash indexing
-                ..Default::default()
-            })
+                    }))
+                    // Add payload indexing for faster filtering/lookup if needed, especially on 'path' or 'hash'
+                    // .payload_schema(...) // Consider adding schema for path/hash indexing
+            )
             .await?;
         info!("Collection '{}' created.", QDRANT_COLLECTION_NAME);
         // It might be wise to explicitly create payload indices here too
@@ -300,28 +294,40 @@ fn calculate_hash(file_path: &Path) -> Result<String> {
     Ok(hex::encode(hash_bytes))
 }
 
-// Update function signature to use non-deprecated client type
-async fn get_existing_hash(client: Arc<QdrantClient>, point_id: PointId) -> Result<Option<String>> {
-    // Use non-deprecated get_points method and provide all arguments
-    let points = client
-        .get_points(
-            QDRANT_COLLECTION_NAME, // collection_name
-            &[point_id], // points selector
-            Some(WithPayloadSelector { // with_payload
-                selector_options: Some(with_payload_selector::SelectorOptions::Include(
-                    PayloadSelector { // Use the imported PayloadSelector struct directly
-                        include_points: vec!["hash".to_string()], // Only fetch the hash
-                    },
-                )),
-            }),
-            None, // with_vectors
-            None, // read_consistency
-            None, // timeout - Added missing argument
-        )
-        .await?;
+// Update function signature to use new Qdrant client type
+async fn get_existing_hash(client: Arc<Qdrant>, point_id: PointId) -> Result<Option<String>> {
+    // Use new get_points method with builder
+    let get_points_req = GetPointsBuilder::new(QDRANT_COLLECTION_NAME, vec![point_id])
+        .with_payload(WithPayloadSelector { // Request only the 'hash' field
+            selector_options: Some(with_payload_selector::SelectorOptions::Include(
+                PayloadSelector {
+                    include_points: vec!["hash".to_string()],
+                },
+            )),
+        })
+        .with_vectors(false); // Don't need vectors for this check
 
-    if let Some(point) = points.result.into_iter().next() {
-        if let Some(hash_value) = point.payload.get("hash") {
+    let points_response = client.get_points(get_points_req).await?;
+
+    // Process the response which is now Vec<RetrievedPoint>
+    if let Some(point) = points_response.result.into_iter().next() {
+        // Payload is now Option<Payload>
+        if let Some(payload) = point.payload {
+            if let Some(hash_value) = payload.inner().get("hash") {
+                // Access the inner map
+                return Ok(hash_value.as_str().map(String::from));
+            }
+        }
+    }
+    Ok(None)
+}
+
+// Update function signature to use new Qdrant client type
+async fn process_file(
+    qdrant_client: Arc<Qdrant>, // Use new Qdrant type
+    embedding_model: Arc<dyn EmbeddingModel>,
+    file_path: &Path,
+    path_str: &str,
             return Ok(hash_value.as_str().map(String::from));
         }
     }
@@ -375,12 +381,10 @@ async fn process_file(
         path: path_str.to_string(),
         hash: current_hash,
     };
-    let payload = serde_json::to_value(metadata)?
-        .as_object()
-        .ok_or_else(|| anyhow!("Failed to convert metadata to JSON object"))?
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone().into()))
-        .collect();
+    // Convert metadata directly to Qdrant Payload type
+    let payload: Payload = serde_json::to_value(metadata)?
+        .try_into()
+        .map_err(|e| anyhow!("Failed to convert metadata to Qdrant Payload: {}", e))?;
 
     // Create Qdrant point
     let point = PointStruct::new(point_id, embedding.vector.into(), payload);
@@ -388,19 +392,16 @@ async fn process_file(
     Ok(Some(point))
 }
 
-// Update function signature to use non-deprecated client type
-async fn upsert_batch(client: Arc<QdrantClient>, points: &[PointStruct]) -> Result<()> {
+// Update function signature to use new Qdrant client type
+async fn upsert_batch(client: Arc<Qdrant>, points: &[PointStruct]) -> Result<()> {
     if points.is_empty() {
         return Ok(());
     }
-    // Use non-deprecated upsert_points method
+    // Use new upsert_points method with builder
     client
         .upsert_points(
-            QDRANT_COLLECTION_NAME, // collection_name
-            None,                   // wait
-            points.to_vec(),        // points
-            None,                   // ordering
-            None                    // timeout
+            UpsertPointsBuilder::new(QDRANT_COLLECTION_NAME, points.to_vec())
+            // .wait(true) // Optionally wait for operation to complete
         )
         .await
         .context("Failed to upsert batch to Qdrant")?;
