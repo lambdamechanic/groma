@@ -29,7 +29,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tabled::{Table, Tabled};
+// Removed tabled imports
 use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use url::Url;
@@ -78,13 +78,7 @@ struct FileMetadata {
     chunk_index: usize, // Index of this chunk within the file
 }
 
-#[derive(Tabled)]
-struct ResultRow {
-    #[tabled(rename = "Relevance")]
-    score: f32,
-    #[tabled(rename = "File Path")]
-    path: String,
-}
+// Removed ResultRow struct as it's no longer needed for tabled output
 
 // Helper to generate a stable UUID for a specific chunk
 fn generate_uuid_for_chunk(path_str: &str, chunk_index: usize) -> Uuid {
@@ -263,21 +257,31 @@ async fn main() -> Result<()> {
         }
     }
 
-    // --- Format and Print Aggregated Results ---
-    let mut aggregated_results: Vec<ResultRow> = file_scores
+    // --- Format and Print Aggregated Results as JSON ---
+    // Convert the HashMap into a Vec of (score, path) tuples
+    let mut aggregated_results: Vec<(f32, String)> = file_scores
         .into_iter()
-        .map(|(path, score)| ResultRow { score, path })
+        .map(|(path, score)| (score, path)) // Create tuples (score, path)
         .collect();
 
     // Sort by score descending
-    aggregated_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    aggregated_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
+    // Create the final JSON structure
+    let mut json_output = HashMap::new();
+    json_output.insert("files_by_relevance", aggregated_results); // Insert the sorted list
 
-    if aggregated_results.is_empty() {
+    if json_output["files_by_relevance"].is_empty() {
         info!("No files found matching the query with cutoff {}", args.cutoff);
+        // Optionally print an empty JSON object or a specific message
+        println!("{}", serde_json::json!({ "files_by_relevance": [] }));
     } else {
-        info!("Aggregated results by file (showing highest score per file):");
-        println!("{}", Table::new(aggregated_results));
+        info!("Printing results as JSON:");
+        // Serialize to JSON and print
+        match serde_json::to_string_pretty(&json_output) { // Use to_string_pretty for readability
+            Ok(json_str) => println!("{}", json_str),
+            Err(e) => error!("Failed to serialize results to JSON: {}", e),
+        }
     }
 
     Ok(())
