@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rig-core = "0.11.1" # Update to latest patch
-# rig-openrouter = "0.11" # Removed - OpenRouter is part of rig-core
-rig-qdrant = "0.1.12"    # Update to latest patch compatible with rig-core 0.11
+# Use the main rig crate with necessary features
+rig = { version = "0.11.1", features = ["openrouter"] }
+# rig-openrouter = "0.11" # Removed - OpenRouter is part of rig crate features
+rig-qdrant = "0.1.12"    # Update to latest patch compatible with rig 0.11
 qdrant-client = "1.14.0" # Update to the version used in rig-qdrant examples
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.4", features = ["derive", "env"] } # Add 'env' feature
 tokio = { version = "1", features = ["full"] }
 sha2 = "0.10"
 hex = "0.4"

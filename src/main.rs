@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use futures::stream::{StreamExt, TryStreamExt};
+// Removed unused futures imports
 // Use the new Qdrant client struct and builder patterns
 use qdrant_client::{
     Payload, // Import Payload struct directly from crate root
@@ -13,11 +13,12 @@ use qdrant_client::{
     },
     Qdrant, // Use the new Qdrant struct
 };
-// Use the main `rig` crate instead of `rig_core`
+// Use the main `rig` crate
 use rig::{
-    embeddings::{embedding::EmbeddingModel, Embeddings, EmbeddingsBuilder}, // Add EmbeddingsBuilder
-    vector_store::{VectorStoreIndex, Point, PointData},
-    providers::openrouter::OpenRouterProvider,
+    embeddings::embedding::EmbeddingModel, // Import the trait
+    // Removed unused Embeddings, EmbeddingsBuilder
+    // Removed unused vector_store imports (Point, PointData, VectorStoreIndex)
+    providers::openrouter::{EmbeddingModel as OpenRouterEmbeddingModel, OpenRouterProvider}, // Import provider and its specific model struct
 };
 // Removed unused import: use rig_qdrant::QdrantVectorStore;
 use serde::{Deserialize, Serialize};
@@ -110,15 +111,15 @@ async fn main() -> Result<()> {
     info!("Initializing clients...");
 
     // OpenRouter Client & Embedding Model
-    // Use the correct path from rig_core::providers::openrouter
     let openrouter_provider = OpenRouterProvider::new(args.openrouter_key.clone());
-    let embedding_model = Arc::new(
+    // Explicitly type the Arc with the concrete model type from the provider
+    let embedding_model: Arc<OpenRouterEmbeddingModel> = Arc::new(
         openrouter_provider
             .embedding_model(&args.openrouter_model)
             .await?,
     );
     info!(
-        "Using OpenRouter model: {} (Dimension: {})",
+        "Using OpenRouter model: {} (Dimension: {})", // Note: EMBEDDING_DIMENSION might need adjustment based on the actual model
         args.openrouter_model, EMBEDDING_DIMENSION
     );
 
@@ -307,27 +308,28 @@ async fn get_existing_hash(client: Arc<Qdrant>, point_id: PointId) -> Result<Opt
 
     let points_response = client.get_points(get_points_req).await?;
 
-    // Process the response which is now Vec<RetrievedPoint>
+    // Process the response which is Vec<RetrievedPoint>
+    // point.payload is HashMap<String, Value>, not Option<Payload>
     if let Some(point) = points_response.result.into_iter().next() {
-        // Payload is Option<Payload>
-        if let Some(payload) = point.payload { // Payload is the struct itself
-            // Access the "hash" field directly using get() on the Payload struct
-            if let Some(hash_value) = payload.get("hash") {
-                return Ok(hash_value.as_str().map(String::from));
-            }
+        // Access the "hash" field directly using get() on the payload HashMap
+        if let Some(hash_value) = point.payload.get("hash") {
+            return Ok(hash_value.as_str().map(String::from));
         }
     }
     Ok(None)
 }
 
-// Update function signature to use new Qdrant client type
-async fn process_file(
-    qdrant_client: Arc<Qdrant>, // Use new Qdrant type
-    embedding_model: Arc<dyn EmbeddingModel>,
+// Make function generic over the EmbeddingModel trait to avoid object safety issues
+async fn process_file<E>(
+    qdrant_client: Arc<Qdrant>,
+    embedding_model: Arc<E>, // Use generic type E
     file_path: &Path,
     path_str: &str,
-    point_id: PointId, // Add missing point_id parameter
-) -> Result<Option<PointStruct>> { // Add missing return type
+    point_id: PointId,
+) -> Result<Option<PointStruct>>
+where
+    E: EmbeddingModel + Send + Sync + 'static, // Add bounds required for async/Arc
+{
     debug!("Processing: {}", path_str);
     let current_hash = calculate_hash(file_path)?;
     let existing_hash = get_existing_hash(qdrant_client.clone(), point_id.clone()).await?;
@@ -349,9 +351,9 @@ async fn process_file(
         return Ok(None);
     }
 
-    // Generate embedding
+    // Generate embedding using embed_text
     // Handle potential errors during embedding
-    let embedding = match embedding_model.embed_string(content).await {
+    let embedding = match embedding_model.embed_text(content).await {
         Ok(emb) => emb,
         Err(e) => {
             error!("Failed to embed file {}: {}", path_str, e);
