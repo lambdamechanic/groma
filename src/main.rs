@@ -5,9 +5,8 @@ use clap::Parser;
 use qdrant_client::{
     Payload, // Import Payload struct directly from crate root
     qdrant::{
-        point_id::PointIdOptions, CreateCollectionBuilder, Distance,
-        GetPointsBuilder, PointStruct, SearchPointsBuilder, VectorParams,
-        VectorsConfig, PointId, // Removed WithPayloadSelector, with_payload_selector
+        point_id::PointIdOptions, CreateCollectionBuilder, Distance, PointStruct,
+        SearchPointsBuilder, VectorParams, VectorsConfig, PointId, // Removed GetPointsBuilder
         UpsertPointsBuilder, // Import UpsertPointsBuilder
         PayloadIncludeSelector, // Import PayloadIncludeSelector
     },
@@ -34,8 +33,10 @@ use tabled::{Table, Tabled};
 use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use url::Url;
-use text_splitter::{ChunkConfig, TextSplitter}; // Import TextSplitter
-use tiktoken_rs::cl100k_base; // Import tokenizer for chunk size calculation
+// Import TextSplitter and ChunkConfig (needed for the constructor)
+use text_splitter::{ChunkConfig, TextSplitter};
+// Import the specific tokenizer type needed for TextSplitter signature
+use tiktoken_rs::{cl100k_base, CoreBPE};
 use uuid::Uuid;
 
 const QDRANT_COLLECTION_NAME: &str = "groma-files";
@@ -283,16 +284,18 @@ async fn main() -> Result<()> {
 }
 
 // Helper function to create a text splitter configured for token-based chunking
-fn create_text_splitter() -> Result<TextSplitter<impl Fn(&str) -> usize>> {
+// Update the return type to use the concrete CoreBPE tokenizer type
+fn create_text_splitter() -> Result<TextSplitter<CoreBPE>> {
     let tokenizer = cl100k_base().context("Failed to load cl100k_base tokenizer")?;
     // Aim for chunks of ~512 tokens, with some overlap. Max size 8191 for safety.
     let chunk_config = ChunkConfig::new(512)
         .with_overlap(50)
-        .with_max_chunk_size_chars(8191 * 4) // Estimate max chars as safety net
+        // Max chunk size is measured in whatever the splitter uses (tokens here)
+        // .with_max_chunk_size_chars(8191 * 4) // This is less relevant when using token splitter
         .with_trim(true); // Trim whitespace
 
-    // Use the tokenizer to count tokens for chunk size
-    Ok(TextSplitter::new(chunk_config, move |text| tokenizer.encode_with_special_tokens(text).len()))
+    // Use the constructor designed for tiktoken integration
+    Ok(TextSplitter::from_tiktoken_with_config(tokenizer, chunk_config))
 }
 
 
@@ -383,13 +386,18 @@ fn calculate_hash(file_path: &Path) -> Result<String> {
     Ok(hex::encode(hash_bytes))
 } // <-- Added missing closing brace
 
-use qdrant_client::qdrant::{Condition, Filter, FieldCondition, Match, MatchValue, PointsSelector, DeletePointsBuilder}; // Imports for filtering/deleting
+// Use the correct import path for MatchValue and remove unused FieldCondition
+use qdrant_client::qdrant::{
+    r#match::MatchValue, // Correct import path for MatchValue
+    Condition, DeletePointsBuilder, Filter, Match, PointsSelector,
+}; // Imports for filtering/deleting
 
 // Fetches the hash of *one* existing chunk for a given file path.
 async fn get_existing_file_hash(client: Arc<Qdrant>, path_str: &str) -> Result<Option<String>> {
+    // Use MatchValue::keyword directly in Condition::matches
     let filter = Filter::must([Condition::matches(
         "path", // Field name in payload
-        Match::new().value(MatchValue::Keyword(path_str.to_string())),
+        MatchValue::keyword(path_str.to_string()), // Use MatchValue::keyword directly
     )]);
 
     // Use search instead of get, limit to 1, only fetch hash payload
@@ -411,17 +419,20 @@ async fn get_existing_file_hash(client: Arc<Qdrant>, path_str: &str) -> Result<O
 // Deletes all points associated with a specific file path using a filter.
 async fn delete_points_by_path(client: Arc<Qdrant>, path_str: &str) -> Result<()> {
     info!("Deleting existing chunks for file: {}", path_str);
+    // Use MatchValue::keyword directly in Condition::matches
     let filter = Filter::must([Condition::matches(
         "path",
-        Match::new().value(MatchValue::Keyword(path_str.to_string())),
+        MatchValue::keyword(path_str.to_string()), // Use MatchValue::keyword directly
     )]);
 
-    let points_selector = PointsSelector::Filter(filter); // Select points based on the filter
+    // Select points based on the filter using the correct enum variant syntax
+    let points_selector = PointsSelector::Filter(filter.into()); // Use .into() if needed, or just filter
 
-    // Use DeletePointsBuilder
+    // Use DeletePointsBuilder correctly: new takes name, selector is set via method
     client
         .delete_points(
-            DeletePointsBuilder::new(QDRANT_COLLECTION_NAME, points_selector)
+            DeletePointsBuilder::new(QDRANT_COLLECTION_NAME)
+                .points_selector(points_selector) // Set selector using the method
             // .wait(true) // Optionally wait
         )
         .await?;
@@ -431,10 +442,11 @@ async fn delete_points_by_path(client: Arc<Qdrant>, path_str: &str) -> Result<()
 
 // Processes a single file: checks hash, deletes old chunks if needed,
 // chunks content, embeds chunks, and returns points to be upserted.
+// Update function signature to use the concrete TextSplitter<CoreBPE> type
 async fn process_file<E>(
     qdrant_client: Arc<Qdrant>,
     embedding_model: Arc<E>,
-    text_splitter: &TextSplitter<impl Fn(&str) -> usize>, // Pass splitter reference
+    text_splitter: &TextSplitter<CoreBPE>, // Use concrete CoreBPE type
     file_path: &Path,
     path_str: &str,
 ) -> Result<Vec<PointStruct>> // Return Vec instead of Option
