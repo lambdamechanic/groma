@@ -38,7 +38,7 @@ use text_splitter::TextSplitter; // Removed note about ChunkConfig
 // Import the specific tokenizer type needed for TextSplitter signature
 use tiktoken_rs::{cl100k_base, CoreBPE};
 use uuid::Uuid;
-use rig::OneOrMany; // Import OneOrMany directly
+// Removed unused import: use rig::OneOrMany;
 
 // Removed const QDRANT_COLLECTION_NAME
 // This needs to match the output dimension of the chosen OpenRouter embedding model
@@ -605,14 +605,15 @@ where
 
     // Process results from EmbeddingsBuilder
     for (chunk_index, (_original_text, embedding_result)) in embedding_results.into_iter().enumerate() {
-        // Assuming OneOrMany::One for simplicity, handle Many if needed
-        match embedding_result {
-            // Use the fully qualified path for the enum variants
-            rig::OneOrMany::One(embedding) => {
-                let chunk_uuid = generate_uuid_for_chunk(path_str, chunk_index);
-                let point_id = uuid_to_point_id(chunk_uuid);
+        // Check if the result contains one or multiple embeddings
+        if embedding_result.len() == 1 {
+            // Get the single embedding using first() (requires Embedding to be Clone)
+            let embedding = embedding_result.first();
 
-                let metadata = FileMetadata {
+            let chunk_uuid = generate_uuid_for_chunk(path_str, chunk_index);
+            let point_id = uuid_to_point_id(chunk_uuid);
+
+            let metadata = FileMetadata {
                 path: path_str.to_string(),
                 hash: current_hash.clone(), // Use the hash of the whole file
                 chunk_index,
@@ -635,20 +636,23 @@ where
                 let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
                 let point = PointStruct::new(point_id, vectors, payload);
                 points_to_upsert.push(point);
+        } else { // len > 1 (cannot be 0 based on OneOrMany guarantees)
+            // This case might occur if the model returns multiple embeddings per document.
+            // The current behavior is to warn and skip.
+            warn!(
+                "Received multiple embeddings ({}) for chunk {} of file {}. Skipping.",
+                embedding_result.len(), chunk_index, path_str
+            );
+            // If handling multiple embeddings is desired, iterate through embedding_result:
+            /*
+            for (sub_index, embedding) in embedding_result.into_iter().enumerate() {
+                // Need a way to generate a unique ID for each sub-chunk embedding
+                // Example: let sub_chunk_uuid = generate_uuid_for_chunk(&format!("{}:{}", path_str, chunk_index), sub_index);
+                // let point_id = uuid_to_point_id(sub_chunk_uuid);
+                // ... create point logic similar to the single embedding case ...
             }
-            // Use the fully qualified path for the enum variants
-            rig::OneOrMany::Many(embeddings) => {
-                 // This case might occur if the model returns multiple embeddings per document.
-                 // Decide how to handle this - perhaps create multiple points or log a warning.
-                 warn!("Received multiple embeddings for chunk {} of file {}. Skipping.", chunk_index, path_str);
-                 // Example: Create a point for the first embedding if desired
-                 /*
-                 if let Some(embedding) = embeddings.into_iter().next() {
-                     // ... create point logic as above ...
-                 }
-                 */
-                 continue;
-            }
+            */
+            continue;
         }
     }
 
