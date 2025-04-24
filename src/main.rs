@@ -158,63 +158,87 @@ async fn main() -> Result<()> {
     let mut total_skipped_files = 0;
     let mut total_failed_files = 0;
 
-    for file_path in files_to_scan {
-        let path_str = file_path.to_string_lossy().to_string();
+    // Create futures for processing each file in parallel
+    let file_processing_futures = files_to_scan
+        .into_iter()
+        .map(|file_path| {
+            // Clone necessary resources for the async task
+            let q_client = qdrant_client.clone();
+            let e_model = embedding_model.clone();
+            let splitter = text_splitter.clone(); // TextSplitter implements Clone
+            let coll_name = collection_name.clone();
+            let path_str = file_path.to_string_lossy().to_string();
+            let path_str_clone = path_str.clone(); // Clone for error reporting
 
-        // Pass the text_splitter reference to process_file
-        match process_file(
-            qdrant_client.clone(),
-            embedding_model.clone(),
-            &text_splitter, // Pass splitter reference
-            &file_path,
-            &path_str,
-            &collection_name, // Pass collection name
-        )
-        .await
-        {
-            Ok(new_points) => {
+            // Create an async block (future) for processing this file
+            async move {
+                match process_file(
+                    q_client,
+                    e_model,
+                    &splitter, // Pass the cloned splitter reference
+                    &file_path,
+                    &path_str,
+                    &coll_name,
+                )
+                .await
+                {
+                    // Return path along with points or error
+                    Ok(points) => Ok((path_str, points)),
+                    Err(e) => Err((path_str_clone, e)),
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    info!("Processing {} files concurrently...", file_processing_futures.len());
+
+    // Execute all file processing futures concurrently
+    let processing_results = join_all(file_processing_futures).await;
+
+    // Process results after all futures have completed
+    for result in processing_results {
+        match result {
+            Ok((path, new_points)) => {
                 if new_points.is_empty() {
                     // File was skipped (up-to-date or empty)
+                    debug!("File skipped (up-to-date or empty): {}", path);
                     total_skipped_files += 1;
                 } else {
                     // File was processed, add its points to the main list
+                    debug!("Successfully processed file: {}", path);
                     total_processed_files += 1;
                     all_points_to_upsert.extend(new_points);
-
-                    // Check if the accumulated batch is large enough to upsert
-                    if all_points_to_upsert.len() >= QDRANT_UPSERT_BATCH_SIZE {
-                        info!(
-                            "Upserting batch of {} points to collection '{}'...",
-                            all_points_to_upsert.len(),
-                            collection_name
-                        );
-                        upsert_batch(qdrant_client.clone(), &collection_name, &all_points_to_upsert).await?;
-                        all_points_to_upsert.clear();
-                    }
                 }
             }
-            Err(e) => {
-                warn!("Failed to process file {}: {}", path_str, e);
+            Err((path, e)) => {
+                warn!("Failed to process file {}: {}", path, e);
                 total_failed_files += 1;
             }
         }
     }
 
-    // Upsert any remaining points
+    info!(
+        "File processing phase complete. Processed: {}, Skipped (up-to-date/empty): {}, Failed: {}",
+        total_processed_files, total_skipped_files, total_failed_files
+    );
+
+    // --- Batch Upsert All Collected Points ---
     if !all_points_to_upsert.is_empty() {
         info!(
-            "Upserting final batch of {} points to collection '{}'...",
+            "Starting batch upsert of {} total points to collection '{}'...",
             all_points_to_upsert.len(),
             collection_name
         );
-        upsert_batch(qdrant_client.clone(), &collection_name, &all_points_to_upsert).await?;
-        all_points_to_upsert.clear();
+        // Upsert in batches
+        for chunk in all_points_to_upsert.chunks(QDRANT_UPSERT_BATCH_SIZE) {
+             info!("Upserting batch of {} points...", chunk.len());
+             upsert_batch(qdrant_client.clone(), &collection_name, chunk).await?;
+        }
+        info!("Finished upserting points.");
+    } else {
+        info!("No new points to upsert.");
     }
 
-    info!(
-        "File processing complete. Processed: {}, Skipped: {}, Failed: {}",
-        total_processed_files, total_skipped_files, total_failed_files
-    );
 
     // --- Read Query from Stdin ---
     info!("Please enter your query and press Enter (or Ctrl+D to finish):");
