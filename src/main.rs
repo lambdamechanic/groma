@@ -12,13 +12,14 @@ use qdrant_client::{
     Qdrant, // Use the new Qdrant struct
 };
 // Use the main `rig` crate
+// Use the main `rig` crate
 use rig::{
     embeddings::{
         embed::{Embed, EmbedError, TextEmbedder}, // Import Embed trait and helpers
         embedding::EmbeddingModel,
         EmbeddingsBuilder, // Import the trait and builder
-    //    OneOrMany, // Import OneOrMany for handling embedding results
     },
+    OneOrMany, // Import OneOrMany for handling embedding results (Moved to top level)
     // Removed unused Embeddings
     // Removed unused vector_store imports (Point, PointData, VectorStoreIndex)
     providers::openai, // Import the openai provider module
@@ -75,6 +76,10 @@ struct Args {
     /// Qdrant server URL (points to gRPC port)
     #[arg(long, env = "QDRANT_URL", default_value = "http://localhost:6334")]
     qdrant_url: Url,
+
+    /// Suppress checking for file updates and upserting to Qdrant
+    #[arg(long)]
+    suppress_updates: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -191,25 +196,28 @@ async fn main() -> Result<()> {
     // Ensure Qdrant collection exists
     ensure_qdrant_collection(qdrant_client.clone(), &collection_name).await?;
 
-    // --- Process Files ---
+    // --- Process Files (Phases 1-4: Scan, Embed, Upsert) ---
     // Create the text splitter once before the loop
     let text_splitter = create_text_splitter().context("Failed to create text splitter")?;
-    info!("Scanning folder: {}", args.folder.display());
-    let files_to_scan = scan_folder(&args.folder)?;
-    info!("Found {} tracked files to potentially process.", files_to_scan.len());
 
     let mut documents_to_embed: Vec<LongDocument> = Vec::new();
-    let mut total_processed_files = 0;
+    let mut _total_processed_files = 0; // Renamed to suppress warning
     let mut total_skipped_files = 0;
     let mut total_failed_files = 0;
     let mut files_requiring_processing = 0;
+    let mut all_points_to_upsert: Vec<PointStruct> = Vec::new();
 
-    info!("Scanning files for changes and collecting content...");
+    if !args.suppress_updates {
+        info!("Checking for file updates and processing changes...");
 
-    // --- Phase 1: Scan files, check hashes, collect documents ---
-    for file_path in files_to_scan {
-        let path_str = file_path.to_string_lossy().to_string();
-        let path_str_clone = path_str.clone(); // Clone for error reporting
+        let files_to_scan = scan_folder(&args.folder)?;
+        info!("Found {} tracked files to potentially process.", files_to_scan.len());
+
+        // --- Phase 1: Scan files, check hashes, collect documents ---
+        info!("Scanning files for changes and collecting content...");
+        for file_path in files_to_scan {
+            let path_str = file_path.to_string_lossy().to_string();
+            let path_str_clone = path_str.clone(); // Clone for error reporting
 
         match async { // Wrap file processing logic in an async block to handle errors easily
             debug!("Checking file: {}", path_str);
@@ -343,13 +351,17 @@ async fn main() -> Result<()> {
              info!("Upserting batch of {} points...", chunk.len());
              upsert_batch(qdrant_client.clone(), &collection_name, chunk).await?;
         }
-        info!("Finished upserting points.");
+            info!("Finished upserting points.");
+        } else {
+            info!("No new points to upsert.");
+        }
     } else {
-        info!("No new points to upsert.");
+         info!("Skipping file updates (--suppress-updates specified).");
     }
+    // --- End of Conditional Update Block ---
 
 
-    // --- Read Query from Stdin ---
+    // --- Phase 5: Read Query from Stdin ---
     info!("Please enter your query and press Enter (or Ctrl+D to finish):");
     let mut query = String::new();
     io::stdin().read_to_string(&mut query)?;
@@ -361,14 +373,14 @@ async fn main() -> Result<()> {
     }
     info!("Processing query...");
 
-    // --- Embed Query ---
+    // --- Phase 6: Embed Query ---
     // Use embed_text and pass the query as &str
     let query_embedding = embedding_model
         .embed_text(query) // Use embed_text and pass &str directly
         .await
         .context("Failed to embed query")?;
 
-    // --- Search Qdrant ---
+    // --- Phase 7: Search Qdrant ---
     info!("Searching for relevant files...");
     // Convert query embedding Vec<f64> to Vec<f32> for Qdrant
     let query_vector_f32: Vec<f32> = query_embedding.vec.into_iter().map(|v| v as f32).collect();
@@ -388,7 +400,7 @@ async fn main() -> Result<()> {
         search_result.result.len()
     );
 
-    // --- Aggregate Results by File Path ---
+    // --- Phase 8: Aggregate Results by File Path ---
     use std::collections::HashMap;
 
     let mut file_scores: HashMap<String, f32> = HashMap::new();
@@ -407,7 +419,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // --- Format and Print Aggregated Results as JSON ---
+    // --- Phase 9: Format and Print Aggregated Results as JSON ---
     // Convert the HashMap into a Vec of (score, relative_path) tuples
     let mut aggregated_results: Vec<(f32, String)> = file_scores
         .into_iter()
