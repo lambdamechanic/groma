@@ -37,7 +37,7 @@ use std::{
 };
 // Removed tabled imports
 use tracing::{debug, error, info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::{EnvFilter, FmtSubscriber}; // Import EnvFilter
 use url::Url;
 // Import TextSplitter
 use text_splitter::TextSplitter; // Removed note about ChunkConfig
@@ -156,12 +156,18 @@ async fn main() -> Result<()> {
     // Parse CLI arguments *first* to determine log level
     let args = Args::parse();
 
-    // Initialize tracing subscriber for logging to stderr
-    let log_level = if args.debug { Level::DEBUG } else { Level::INFO };
+    // Initialize tracing subscriber using EnvFilter
+    // Default level is INFO, or DEBUG if --debug is passed.
+    // RUST_LOG environment variable overrides the default.
+    let default_level = if args.debug { "debug" } else { "info" };
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default_level));
+
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level) // Set level based on --debug flag
-        .with_writer(std::io::stderr) // Configure the writer to use stderr
+        .with_env_filter(env_filter) // Use EnvFilter
+        .with_writer(std::io::stderr)
         .finish();
+
     tracing::subscriber::set_global_default(subscriber)
         .expect("setting default subscriber failed");
 
