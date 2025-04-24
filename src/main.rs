@@ -328,20 +328,8 @@ async fn process_file(
     embedding_model: Arc<dyn EmbeddingModel>,
     file_path: &Path,
     path_str: &str,
-            return Ok(hash_value.as_str().map(String::from));
-        }
-    }
-    Ok(None)
-}
-
-// Update function signature to use non-deprecated client type
-async fn process_file(
-    qdrant_client: Arc<QdrantClient>,
-    embedding_model: Arc<dyn EmbeddingModel>,
-    file_path: &Path,
-    path_str: &str,
-    point_id: PointId,
-) -> Result<Option<PointStruct>> {
+    point_id: PointId, // Add missing point_id parameter
+) -> Result<Option<PointStruct>> { // Add missing return type
     debug!("Processing: {}", path_str);
     let current_hash = calculate_hash(file_path)?;
     let existing_hash = get_existing_hash(qdrant_client.clone(), point_id.clone()).await?;
