@@ -523,7 +523,7 @@ async fn perform_file_updates(
         "Git diff (vs workdir) found {} changed items potentially within the target folder.",
         diff.deltas().len()
     );
-    info!("Stage [Update]: Git diff calculated.");
+    info!("Stage [Update]: Git diff calculated (or skipped for first run).");
 
     let text_splitter = create_text_splitter().context("Failed to create text splitter")?;
     let mut documents_to_embed: Vec<LongDocument> = Vec::new();
@@ -531,14 +531,45 @@ async fn perform_file_updates(
     let mut processed_new_paths: std::collections::HashSet<PathBuf> =
         std::collections::HashSet::new(); // Track processed adds/renames
     let mut processed_count = 0;
-    info!("Stage [Update]: Initialized variables for diff processing.");
+    info!("Stage [Update]: Initialized variables for processing.");
 
-    // --- Phase 2: Process Diff Deltas ---
-    info!("Stage [Update]: Starting processing of Git diff deltas...");
-    for diff_delta in diff.deltas() {
-        let delta = diff_delta.status();
-        let old_repo_path = diff_delta.old_file().path(); // Path relative to repo root
-        let new_repo_path = diff_delta.new_file().path(); // Path relative to repo root
+    // --- Phase 2: Process Changes ---
+    if previous_tree.is_none() {
+        // --- First Run: Process all tracked files in HEAD within the target folder ---
+        info!("Stage [Update]: First run detected. Processing all tracked files in target folder...");
+        let current_tree = repo.head()?.peel_to_tree()?;
+        current_tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+            if let Some(entry_path) = entry.path() {
+                let full_path = workdir.join(root).join(entry_path);
+                // Filter: Ensure the path is within the canonical target folder
+                if full_path.starts_with(canonical_folder_path) && entry.kind() == Some(git2::ObjectType::Blob) {
+                    if let Ok(canonical_path) = fs::canonicalize(&full_path) {
+                        let path_str = canonical_path.to_string_lossy().to_string();
+                        info!("Processing (first run): {}", path_str);
+                        processed_count += 1;
+                        processed_new_paths.insert(canonical_path.clone()); // Track this path
+
+                        match process_file_for_embedding(&canonical_path, &text_splitter) {
+                            Ok(Some(doc)) => documents_to_embed.push(doc),
+                            Ok(None) => info!("Skipping empty or unreadable file: {}", path_str),
+                            Err(e) => warn!("Failed processing file {}: {}", path_str, e),
+                        }
+                    } else {
+                         warn!("Could not canonicalize path during first run walk: {}", full_path.display());
+                    }
+                }
+            }
+            git2::TreeWalkResult::Ok // Continue walking
+        })?;
+        info!("Finished processing {} files during first run.", processed_count);
+
+    } else {
+        // --- Subsequent Run: Process Diff Deltas ---
+        info!("Stage [Update]: Starting processing of Git diff deltas...");
+        for diff_delta in diff.deltas() {
+            let delta = diff_delta.status();
+            let old_repo_path = diff_delta.old_file().path(); // Path relative to repo root
+            let new_repo_path = diff_delta.new_file().path(); // Path relative to repo root
 
         // Construct absolute paths based on workdir
         let old_absolute_path = old_repo_path.map(|p| workdir.join(p));
@@ -662,14 +693,15 @@ async fn perform_file_updates(
           // Note: The if/else if chain handles NEW, MODIFIED, TYPECHANGE, DELETED, RENAMED.
           // We implicitly ignore other statuses by not having an `else` block here.
           // The debug log for ignored statuses was removed as it was part of the old `_` match arm.
-          // Note: We are ignoring other statuses like CONFLICTED, IGNORED, UNTRACKED, etc.
-          // as they shouldn't appear in a tree-to-tree diff reflecting committed changes.
-    } // Closes the `for delta in diff.deltas()` loop
-    info!(
-        "Finished processing {} Git diff deltas relevant to the target folder.",
-        processed_count
-    );
-    info!("Stage [Update]: Finished processing Git diff deltas.");
+            // Note: We are ignoring other statuses like CONFLICTED, IGNORED, UNTRACKED, etc.
+            // as they shouldn't appear in a tree-to-tree diff reflecting committed changes.
+        } // Closes the `for delta in diff.deltas()` loop
+        info!(
+            "Finished processing {} Git diff deltas relevant to the target folder.",
+            processed_count
+        );
+        info!("Stage [Update]: Finished processing Git diff deltas.");
+    } // Closes the else block for subsequent runs
 
     // --- Phase 3: Delete Obsolete Points ---
     info!("Stage [Update]: Starting deletion of obsolete Qdrant points...");
