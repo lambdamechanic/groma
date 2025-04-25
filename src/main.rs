@@ -40,7 +40,7 @@ use rig::{
 use serde::{Deserialize, Serialize}; // Already present, used for FileMetadata and now GromaState
 use serde_json; // Added for state serialization
 use sha2::{Digest, Sha256};
-use text_splitter::TextSplitter;
+// Removed unused TextSplitter import
 use tiktoken_rs::{cl100k_base, CoreBPE};
 use tracing::{debug, error, info, warn}; // Removed Level
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
@@ -816,9 +816,10 @@ async fn perform_file_updates(
             for (long_document, embedding_result) in embedding_results.into_iter() {
                 debug!(
                     "Processing {} embedding(s) for document '{}' (from batch {})",
-                embedding_result.len(),
-                long_document.path_str
-            );
+                    embedding_result.len(),
+                    long_document.path_str,
+                    batch_index + 1 // Added missing argument
+                );
             for (chunk_index, embedding) in embedding_result.into_iter().enumerate() {
                 let chunk_uuid = generate_uuid_for_chunk(&long_document.path_str, chunk_index);
                 let point_id = uuid_to_point_id(chunk_uuid);
