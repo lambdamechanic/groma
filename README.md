@@ -3,14 +3,14 @@
 Groma is a command-line tool that scans a folder within a Git repository, embeds the content of tracked files using OpenAI, stores these embeddings in a Qdrant vector database, and allows you to query for relevant files based on semantic similarity.
 
 ## Why "Groma"?
-<table border="0" cellspacing="0">
+<table border="0" cellspacing="0" style="border: none;">
 <tr>
-<td valign="top">
+<td valign="top" style="border: none;">
 The name comes from the <a href="https://en.wikipedia.org/wiki/Groma_(surveying)">groma</a>, a surveying instrument used in the Roman Empire. 
 
 Just as the ancient groma helped surveyors find straight lines and structure in the physical landscape, this tool helps you find relevant files (the "straight lines") within the structured landscape of your codebase.
 </td>
-<td valign="top" align="right">
+<td valign="top" align="right" style="border: none;">
 <img src="https://github.com/lambdamechanic/groma/raw/main/assets/images/GromaNovotny.png" alt="Groma Surveying Tool" width="200"/>
 </td>
 </tr>
