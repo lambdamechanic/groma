@@ -376,6 +376,7 @@ async fn main() -> Result<()> {
     // 1. Parse Arguments & Initialize Logging
     let args = Args::parse();
     initialize_logging(args.debug);
+    info!("Starting Groma process...");
 
     // 2. Canonicalize Folder Path (used for relative path calculation later)
     let canonical_folder_path = fs::canonicalize(&args.folder).with_context(|| {
@@ -388,9 +389,10 @@ async fn main() -> Result<()> {
         "Using canonical folder path: {}",
         canonical_folder_path.display()
     );
+    info!("Stage: Canonicalized folder path.");
 
     // 3. Initialize Clients (OpenAI, Qdrant)
-    info!("Initializing clients...");
+    info!("Stage: Initializing clients...");
     let openai_client = rig::providers::openai::Client::new(&args.openai_key);
     let embedding_model: Arc<openai::EmbeddingModel> =
         Arc::new(openai_client.embedding_model(&args.openai_model));
@@ -400,11 +402,14 @@ async fn main() -> Result<()> {
     );
     let qdrant_client = Arc::new(Qdrant::from_url(&args.qdrant_url.to_string()).build()?);
     info!("Connected to Qdrant at {}", args.qdrant_url);
+    info!("Stage: Clients initialized.");
 
     // 4. Determine Collection Name & Ensure It Exists
+    info!("Stage: Determining collection name...");
     let collection_name = generate_collection_name(&args.folder)?;
     info!("Using Qdrant collection: {}", collection_name);
     ensure_qdrant_collection(qdrant_client.clone(), &collection_name).await?;
+    info!("Stage: Qdrant collection ensured.");
 
     // 5. Discover Repository and Perform File Updates if not suppressed
     let repo = Repository::discover(&args.folder).with_context(|| {
@@ -417,8 +422,10 @@ async fn main() -> Result<()> {
         .workdir()
         .ok_or_else(|| anyhow!("Git repository is bare, cannot process files"))?;
     info!("Found Git repository at: {}", workdir.display());
+    info!("Stage: Git repository discovered.");
 
     if !args.suppress_updates {
+        info!("Stage: Starting file updates...");
         perform_file_updates(
             &args,
             &repo, // Pass repository reference
@@ -431,8 +438,10 @@ async fn main() -> Result<()> {
     } else {
         info!("Skipping file updates (--suppress-updates specified).");
     }
+    info!("Stage: File updates complete (or skipped).");
 
     // 6. Process User Query (Read, Embed, Search, Format Output)
+    info!("Stage: Starting query processing...");
     process_query(
         &args,
         qdrant_client.clone(),
@@ -441,7 +450,9 @@ async fn main() -> Result<()> {
         &canonical_folder_path,
     )
     .await?;
+    info!("Stage: Query processing complete.");
 
+    info!("Groma process finished successfully.");
     Ok(())
 } // Close main function block here
 
@@ -454,16 +465,20 @@ async fn perform_file_updates(
     collection_name: &str,
     canonical_folder_path: &Path, // Base path for filtering and relative paths
 ) -> Result<()> {
+    info!("Entering perform_file_updates function...");
     info!("Checking for file updates using Git and processing changes...");
 
     let workdir = repo
         .workdir()
         .ok_or_else(|| anyhow!("Git repository is bare, cannot process files"))?;
+    info!("Stage [Update]: Determined workdir.");
 
     // --- Phase 1: Load State & Determine Git Diff ---
+    info!("Stage [Update]: Loading previous state...");
     let previous_state = load_state(repo)?;
     let head_commit_oid = repo.head()?.peel_to_commit()?.id();
     info!("Current HEAD OID: {}", head_commit_oid);
+    info!("Stage [Update]: State loaded.");
 
     let previous_tree = match previous_state {
         Some(ref state) => {
@@ -481,10 +496,12 @@ async fn perform_file_updates(
         }
         None => None, // First run, compare against empty tree
     };
+    info!("Stage [Update]: Determined previous Git tree.");
 
     // Diff HEAD against the previous tree (or empty tree if first run)
     // We compare against the committed state (HEAD) to ensure reproducibility.
     // Changes in the working directory or index that are not committed yet won't be processed.
+    info!("Stage [Update]: Calculating Git diff...");
     let current_tree = repo.head()?.peel_to_tree()?;
     let mut diff_opts = DiffOptions::new();
     // diff_opts.include_renames(true); // Rename detection is often default or handled differently
@@ -504,6 +521,7 @@ async fn perform_file_updates(
         "Git diff found {} changed items potentially within the target folder.",
         diff.deltas().len()
     );
+    info!("Stage [Update]: Git diff calculated.");
 
     let text_splitter = create_text_splitter().context("Failed to create text splitter")?;
     let mut documents_to_embed: Vec<LongDocument> = Vec::new();
@@ -511,8 +529,10 @@ async fn perform_file_updates(
     let mut processed_new_paths: std::collections::HashSet<PathBuf> =
         std::collections::HashSet::new(); // Track processed adds/renames
     let mut processed_count = 0;
+    info!("Stage [Update]: Initialized variables for diff processing.");
 
     // --- Phase 2: Process Diff Deltas ---
+    info!("Stage [Update]: Starting processing of Git diff deltas...");
     for diff_delta in diff.deltas() {
         let delta = diff_delta.status();
         let old_repo_path = diff_delta.old_file().path(); // Path relative to repo root
@@ -647,8 +667,10 @@ async fn perform_file_updates(
         "Finished processing {} Git diff deltas relevant to the target folder.",
         processed_count
     );
+    info!("Stage [Update]: Finished processing Git diff deltas.");
 
     // --- Phase 3: Delete Obsolete Points ---
+    info!("Stage [Update]: Starting deletion of obsolete Qdrant points...");
     // Deduplicate paths to delete before executing deletions
     paths_to_delete.sort();
     paths_to_delete.dedup();
@@ -677,8 +699,10 @@ async fn perform_file_updates(
     } else {
         info!("No points marked for deletion.");
     }
+    info!("Stage [Update]: Finished deletion of obsolete Qdrant points.");
 
     // --- Phase 4 & 5: Batch Embed and Create Points ---
+    info!("Stage [Update]: Starting batch embedding and point creation...");
     let mut all_points_to_upsert: Vec<PointStruct> = Vec::new();
     if !documents_to_embed.is_empty() {
         info!(
@@ -735,8 +759,10 @@ async fn perform_file_updates(
     } else {
         info!("No documents require embedding.");
     }
+    info!("Stage [Update]: Finished batch embedding and point creation.");
 
     // --- Phase 6: Batch Upsert All Collected Points ---
+    info!("Stage [Update]: Starting batch upsert to Qdrant...");
     if !all_points_to_upsert.is_empty() {
         info!(
             "Starting batch upsert of {} total points to collection '{}'...",
@@ -756,15 +782,19 @@ async fn perform_file_updates(
     } else {
         info!("No new points to upsert.");
     }
+    info!("Stage [Update]: Finished batch upsert to Qdrant.");
 
     // --- Phase 7: Save State ---
+    info!("Stage [Update]: Saving state...");
     // Only save state if the diff processing and upserting seemed successful
     // (Error handling within the loops might allow partial success, consider if this is desired)
     let current_state = GromaState {
         last_processed_oid: head_commit_oid.to_string(),
     };
     save_state(repo, &current_state)?;
+    info!("Stage [Update]: State saved.");
 
+    info!("Exiting perform_file_updates function.");
     Ok(())
 }
 
@@ -820,7 +850,9 @@ async fn process_query(
     collection_name: &str,
     canonical_folder_path: &Path, // Needed for making paths relative
 ) -> Result<()> {
+    info!("Entering process_query function...");
     // --- Phase 5: Read Query from Stdin ---
+    info!("Stage [Query]: Reading query from stdin...");
     info!("Please enter your query and press Enter (Ctrl+D to finish):");
     let mut query = String::new();
     io::stdin()
@@ -833,14 +865,18 @@ async fn process_query(
         return Ok(());
     }
     info!("Processing query: '{}'", query);
+    info!("Stage [Query]: Query read.");
 
     // --- Phase 6: Embed Query ---
+    info!("Stage [Query]: Embedding query...");
     let query_embedding = embedding_model
         .embed_text(query)
         .await
         .context("Failed to embed query")?;
+    info!("Stage [Query]: Query embedded.");
 
     // --- Phase 7: Search Qdrant ---
+    info!("Stage [Query]: Searching Qdrant...");
     info!("Searching for relevant files...");
     let query_vector_f32: Vec<f32> = query_embedding.vec.into_iter().map(|v| v as f32).collect();
 
@@ -856,8 +892,10 @@ async fn process_query(
         "Found {} potential matching chunks.",
         search_result.result.len()
     );
+    info!("Stage [Query]: Qdrant search complete.");
 
     // --- Phase 8: Aggregate Results by File Path ---
+    info!("Stage [Query]: Aggregating results by file path...");
     // Group results by file path, keeping the highest score for each file.
     let mut file_scores: HashMap<String, f32> = HashMap::new();
     for hit in search_result.result {
@@ -878,8 +916,10 @@ async fn process_query(
             warn!("Found hit without 'path' payload: {:?}", hit.payload);
         }
     }
+    info!("Stage [Query]: Results aggregated.");
 
     // --- Phase 9: Format and Print Aggregated Results as JSON ---
+    info!("Stage [Query]: Formatting and printing results...");
     // Convert absolute paths to relative paths and sort by score.
     let mut aggregated_results: Vec<(f32, String)> = file_scores
         .into_iter()
@@ -917,6 +957,8 @@ async fn process_query(
             Err(e) => error!("Failed to serialize results to JSON: {}", e),
         }
     }
+    info!("Stage [Query]: Results printed.");
 
+    info!("Exiting process_query function.");
     Ok(())
 }
