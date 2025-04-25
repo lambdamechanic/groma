@@ -101,6 +101,9 @@ In an aider session:
 > /load .LOADCOMMANDS
 ```
 
+I'm hoping at some point `aider` gets a little more straightforwardly scriptable.
+
+
 ### `scripts/gromaprompt.jq`
 
 This script formats the output into a human-readable list suitable for including in prompts for Large Language Models (LLMs), indicating potentially relevant files.
@@ -114,9 +117,4 @@ The relevant data may be in these files:
 - src/shinynewtranslater/cobol.rs
 - src/deepestdarkest/legacylayer/thatactuallydoesthejob/cobol.rs
 > make sure we're ready for the y10k bug
-```
-
-**Example Output from `prompt.jq`:**
-
-```
 ```
