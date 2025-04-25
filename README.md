@@ -6,7 +6,7 @@ Groma is a command-line tool that scans a folder within a Git repository, embeds
 <table border="0" cellspacing="0">
 <tr>
 <td valign="top">
-The name comes from the [groma](https://en.wikipedia.org/wiki/Groma_(surveying)), a surveying instrument used in the Roman Empire. 
+The name comes from the [groma](https://en.wikipedia.org/wiki/Groma_(surveying) ), a surveying instrument used in the Roman Empire. 
 
 Just as the ancient groma helped surveyors find straight lines and structure in the physical landscape, this tool helps you find relevant files (the "straight lines") within the structured landscape of your codebase.
 </td>
