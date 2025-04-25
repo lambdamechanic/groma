@@ -13,10 +13,11 @@ Just as the ancient groma helped surveyors find straight lines and structure in 
 Groma requires a running Qdrant vector database instance. You can easily start one using Docker:
 
 ```bash
-docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+mkdir ~/.qdrant_data
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant   -v $HOME/.qdrant_data:/qdrant/storage
 ```
 
-This command exposes Qdrant's HTTP API on port 6333 and its gRPC API (which Groma uses) on port 6334.
+This command exposes Qdrant's HTTP API on port 6333 and its gRPC API (which Groma uses) on port 6334, and makes sure the data is persisted locally.
 
 You also need an OpenAI API key.
 
