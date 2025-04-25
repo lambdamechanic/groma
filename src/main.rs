@@ -10,7 +10,7 @@ use std::{
 // External crate imports
 use anyhow::{anyhow, Context, Result}; // Removed bail
 use clap::Parser;
-use git2::{Delta, DiffOptions, Oid, Repository, Status}; // Added Delta, DiffOptions, Oid, Status
+use git2::{Delta, DiffOptions, Oid, Repository}; // Added Delta, DiffOptions, Oid, Removed Status
 use hex; // Added for encoding hashes
 use qdrant_client::{
     qdrant::{
@@ -314,50 +314,6 @@ fn calculate_hash(file_path: &Path) -> Result<String> {
         .with_context(|| format!("Failed to read file for hashing: {}", file_path.display()))?;
     let hash_bytes = hasher.finalize();
     Ok(hex::encode(hash_bytes))
-}
-
-/// Fetches the stored hash for *one* chunk associated with the given file path
-/// from the Qdrant collection. Returns `Ok(None)` if no chunk is found for the path.
-/// Note: This is less critical now as we rely on Git diff, but can be useful for double-checking
-/// if a file marked as 'Modified' actually existed before.
-async fn get_existing_file_hash(
-    client: Arc<Qdrant>,
-    collection_name: &str,
-    path_str: &str,
-) -> Result<Option<String>> {
-    debug!("Checking Qdrant for existing hash for path: {}", path_str);
-    // Filter points where the 'path' payload field matches the given path_str
-    let filter = Filter::must([Condition::matches(
-        "path",
-        MatchValue::Keyword(path_str.to_string()),
-    )]);
-
-    // Search for just one point matching the filter, requesting only the 'hash' payload field.
-    // We don't need the vector for this check.
-    let search_req =
-        SearchPointsBuilder::new(collection_name, vec![0.0; EMBEDDING_DIMENSION as usize], 1)
-            .filter(filter)
-            .with_payload(PayloadIncludeSelector {
-                fields: vec!["hash".to_string()],
-            })
-            .with_vectors(false);
-
-    let search_result = client.search_points(search_req).await?;
-
-    // If a point is found, extract the hash from its payload.
-    if let Some(point) = search_result.result.into_iter().next() {
-        if let Some(hash_value) = point.payload.get("hash") {
-            // Convert the Qdrant Value to a String
-            return Ok(hash_value.as_str().map(String::from));
-        } else {
-            warn!(
-                "Found point for path '{}' but it's missing the 'hash' payload.",
-                path_str
-            );
-        }
-    }
-    // No point found for this path
-    Ok(None)
 }
 
 /// Deletes all points associated with a specific file path from the Qdrant collection.
