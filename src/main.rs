@@ -54,6 +54,9 @@ use uuid::Uuid;
 const EMBEDDING_DIMENSION: u64 = 1536;
 /// The number of points to upsert to Qdrant in a single batch.
 const QDRANT_UPSERT_BATCH_SIZE: usize = 100;
+/// The number of *documents* to send to the embedding API in a single batch.
+/// Adjust this based on typical document size and API rate limits.
+const EMBEDDING_BATCH_SIZE: usize = 10; // Start with a conservative value
 /// The target size for text chunks in tokens before embedding.
 /// Aiming for the maximum supported by models like text-embedding-3-small (8192).
 const TARGET_CHUNK_SIZE_TOKENS: usize = 8192;
@@ -766,22 +769,53 @@ async fn perform_file_updates(
     let mut all_points_to_upsert: Vec<PointStruct> = Vec::new();
     if !documents_to_embed.is_empty() {
         info!(
-            "Starting batch embedding for {} added/modified/renamed documents...",
-            documents_to_embed.len()
+            "Starting embedding for {} documents in batches of {}...",
+            documents_to_embed.len(),
+            EMBEDDING_BATCH_SIZE
         );
-        // Need to pass the owned documents to the builder
-        let docs_for_builder: Vec<LongDocument> = documents_to_embed; // Move ownership
-        let embedding_results = EmbeddingsBuilder::new((*embedding_model).clone())
-            .documents(docs_for_builder)? // Pass owned Vec
-            .build()
-            .await
-            .context("Failed to generate embeddings using EmbeddingsBuilder")?;
-        info!("Successfully generated embeddings.");
 
-        info!("Constructing Qdrant points from embeddings...");
-        for (long_document, embedding_result) in embedding_results.into_iter() {
-            debug!(
-                "Processing {} embedding(s) for document '{}'",
+        // Process documents in batches for embedding
+        for (batch_index, doc_batch) in documents_to_embed
+            .chunks(EMBEDDING_BATCH_SIZE)
+            .enumerate()
+        {
+            info!(
+                "Processing embedding batch {} ({} documents)...",
+                batch_index + 1,
+                doc_batch.len()
+            );
+
+            // Need to pass owned documents to the builder for this batch
+            // We clone the necessary data from the LongDocument references
+            let docs_for_builder: Vec<LongDocument> = doc_batch
+                .iter()
+                .map(|doc_ref| LongDocument {
+                    path_str: doc_ref.path_str.clone(),
+                    current_hash: doc_ref.current_hash.clone(),
+                    content: doc_ref.content.clone(),
+                    tokenizer: doc_ref.tokenizer, // Reference is fine here
+                })
+                .collect();
+
+            let embedding_results = EmbeddingsBuilder::new((*embedding_model).clone())
+                .documents(docs_for_builder)? // Pass owned Vec for the batch
+                .build()
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to generate embeddings for batch {}",
+                        batch_index + 1
+                    )
+                })?;
+            info!(
+                "Successfully generated embeddings for batch {}.",
+                batch_index + 1
+            );
+
+            debug!("Constructing Qdrant points from batch {} embeddings...", batch_index + 1);
+            for (long_document, embedding_result) in embedding_results.into_iter() {
+                debug!(
+                    "Processing {} embedding(s) for document '{}' (from batch {})",
                 embedding_result.len(),
                 long_document.path_str
             );
@@ -813,13 +847,20 @@ async fn perform_file_updates(
             }
         }
         info!(
-            "Finished constructing {} points.",
+            "Finished constructing points for batch {}. Total points so far: {}",
+            batch_index + 1,
+            all_points_to_upsert.len()
+        );
+        } // End of batch loop
+
+        info!(
+            "Finished constructing {} total points from all batches.",
             all_points_to_upsert.len()
         );
     } else {
         info!("No documents require embedding.");
     }
-    info!("Stage [Update]: Finished batch embedding and point creation.");
+    info!("Stage [Update]: Finished embedding and point creation.");
 
     // --- Phase 6: Batch Upsert All Collected Points ---
     info!("Stage [Update]: Starting batch upsert to Qdrant...");
