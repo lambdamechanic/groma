@@ -571,7 +571,7 @@ async fn perform_file_updates(
         // --- is actually within the *canonical target folder*. Git's pathspec is prefix-based
         // --- and might include files outside the exact target folder if names overlap.
         // Use constants for status checks (INDEX_* for tree-to-tree diff)
-        let relevant_path_for_filter = if status == Status::INDEX_DELETED {
+        let relevant_path_for_filter = if status.contains(Status::INDEX_DELETED) {
             old_absolute_path.as_ref()
         } else {
             new_absolute_path.as_ref() // INDEX_NEW, INDEX_MODIFIED, INDEX_RENAMED, INDEX_TYPECHANGE etc.
@@ -589,9 +589,9 @@ async fn perform_file_updates(
         processed_count += 1; // Count files actually processed after filtering
 
         // Use if/else if with status constants (bitflags)
-        if status == Status::INDEX_NEW
-            || status == Status::INDEX_MODIFIED
-            || status == Status::INDEX_TYPECHANGE
+        if status.contains(Status::INDEX_NEW)
+            || status.contains(Status::INDEX_MODIFIED)
+            || status.contains(Status::INDEX_TYPECHANGE)
         {
             if let Some(new_path_abs) = new_absolute_path {
                 // Canonicalize AFTER confirming it starts with the canonical_folder_path prefix
@@ -602,7 +602,7 @@ async fn perform_file_updates(
 
                     // If modified/typechange, ensure old points are deleted (using canonical path)
                     // This handles cases where filename case might change but path object differs
-                    if status == Status::INDEX_MODIFIED || status == Status::INDEX_TYPECHANGE {
+                    if status.contains(Status::INDEX_MODIFIED) || status.contains(Status::INDEX_TYPECHANGE) {
                         if let Some(old_path_abs) = old_absolute_path.as_ref() {
                             // Attempt to canonicalize the old path for deletion consistency
                             if let Ok(canonical_old) = fs::canonicalize(old_path_abs) {
@@ -631,7 +631,7 @@ async fn perform_file_updates(
                     );
                 }
             }
-        } else if status == Status::INDEX_DELETED {
+        } else if status.contains(Status::INDEX_DELETED) {
             if let Some(old_path_abs) = old_absolute_path {
                 // Attempt to canonicalize the path for deletion consistency
                 if let Ok(canonical_old) = fs::canonicalize(&old_path_abs) {
@@ -644,7 +644,7 @@ async fn perform_file_updates(
                     paths_to_delete.push(old_path_abs.to_string_lossy().to_string());
                 }
             }
-        } else if status == Status::INDEX_RENAMED {
+        } else if status.contains(Status::INDEX_RENAMED) {
             if let (Some(old_path_abs), Some(new_path_abs)) = (old_absolute_path, new_absolute_path)
             {
                 // Canonicalize AFTER confirming the new path starts with the canonical_folder_path prefix
