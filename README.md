@@ -73,3 +73,47 @@ You also need an OpenAI API key.
       ]
     }
     ```
+
+## Helper Scripts
+
+The `scripts/` directory contains `jq` scripts to process Groma's JSON output for different purposes.
+
+### `scripts/load.jq`
+
+This script transforms the output into a format suitable for loading files into tools like `aider` using a `.LOADCOMMANDS` file. It prepends `/add ` to each filename.
+
+**Example Usage:**
+
+```bash
+# Run groma and save the output to a temporary file
+echo "database connection pooling" | groma /path/to/your/repo/subdir --cutoff 0.3 > groma_output.json
+
+# Process the output with load.jq and save to .LOADCOMMANDS
+jq -rf scripts/load.jq groma_output.json > .LOADCOMMANDS
+
+# Now you can use this file in aider (or similar tools)
+# Example: aider --load .LOADCOMMANDS
+
+# Or combine into one command:
+echo "database connection pooling" | groma /path/to/your/repo/subdir --cutoff 0.3 | jq -rf scripts/load.jq > .LOADCOMMANDS
+```
+
+### `scripts/prompt.jq`
+
+This script formats the output into a human-readable list suitable for including in prompts for Large Language Models (LLMs), indicating potentially relevant files.
+
+**Example Usage:**
+
+```bash
+# Run groma and pipe the output directly to prompt.jq
+echo "refactoring the authentication module" | groma /path/to/your/repo/subdir --cutoff 0.4 | jq -rf scripts/prompt.jq
+```
+
+**Example Output from `prompt.jq`:**
+
+```
+The relevant data may be in these files:
+- src/auth/mod.rs
+- src/user/model.rs
+- tests/auth_integration_test.rs
+```
