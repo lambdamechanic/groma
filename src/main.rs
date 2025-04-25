@@ -412,6 +412,7 @@ async fn main() -> Result<()> {
     info!("Stage: Qdrant collection ensured.");
 
     // 5. Discover Repository and Perform File Updates if not suppressed
+    info!("Stage: Discovering Git repository...");
     let repo = Repository::discover(&args.folder).with_context(|| {
         format!(
             "Failed to find Git repository containing path: {}",
