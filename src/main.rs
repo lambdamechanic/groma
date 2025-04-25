@@ -10,7 +10,7 @@ use std::{
 // External crate imports
 use anyhow::{anyhow, Context, Result}; // Removed bail
 use clap::Parser;
-use git2::{DiffOptions, Oid, Repository, Status}; // Added DiffOptions, Oid, Status
+use git2::{Delta, DiffOptions, Oid, Repository, Status}; // Added Delta, DiffOptions, Oid, Status
 use hex; // Added for encoding hashes
 use qdrant_client::{
     qdrant::{
@@ -570,11 +570,11 @@ async fn perform_file_updates(
         // --- Crucial Filter: Ensure the *new* path (for Add/Modify/Rename) or *old* path (for Delete)
         // --- is actually within the *canonical target folder*. Git's pathspec is prefix-based
         // --- and might include files outside the exact target folder if names overlap.
-        // Use constants for status checks (INDEX_* for tree-to-tree diff)
-        let relevant_path_for_filter = if status.contains(Status::INDEX_DELETED) {
+        // Use Delta enum variants for status checks
+        let relevant_path_for_filter = if status == Delta::Deleted {
             old_absolute_path.as_ref()
         } else {
-            new_absolute_path.as_ref() // INDEX_NEW, INDEX_MODIFIED, INDEX_RENAMED, INDEX_TYPECHANGE etc.
+            new_absolute_path.as_ref() // Added, Modified, Renamed, Typechange etc.
         };
 
         if relevant_path_for_filter.map_or(true, |p| !p.starts_with(canonical_folder_path)) {
@@ -588,11 +588,8 @@ async fn perform_file_updates(
 
         processed_count += 1; // Count files actually processed after filtering
 
-        // Use if/else if with status constants (bitflags)
-        if status.contains(Status::INDEX_NEW)
-            || status.contains(Status::INDEX_MODIFIED)
-            || status.contains(Status::INDEX_TYPECHANGE)
-        {
+        // Use if/else if with Delta enum variants
+        if status == Delta::Added || status == Delta::Modified || status == Delta::Typechange {
             if let Some(new_path_abs) = new_absolute_path {
                 // Canonicalize AFTER confirming it starts with the canonical_folder_path prefix
                 if let Ok(canonical_new) = fs::canonicalize(&new_path_abs) {
@@ -602,7 +599,7 @@ async fn perform_file_updates(
 
                     // If modified/typechange, ensure old points are deleted (using canonical path)
                     // This handles cases where filename case might change but path object differs
-                    if status.contains(Status::INDEX_MODIFIED) || status.contains(Status::INDEX_TYPECHANGE) {
+                    if status == Delta::Modified || status == Delta::Typechange {
                         if let Some(old_path_abs) = old_absolute_path.as_ref() {
                             // Attempt to canonicalize the old path for deletion consistency
                             if let Ok(canonical_old) = fs::canonicalize(old_path_abs) {
@@ -631,7 +628,7 @@ async fn perform_file_updates(
                     );
                 }
             }
-        } else if status.contains(Status::INDEX_DELETED) {
+        } else if status == Delta::Deleted {
             if let Some(old_path_abs) = old_absolute_path {
                 // Attempt to canonicalize the path for deletion consistency
                 if let Ok(canonical_old) = fs::canonicalize(&old_path_abs) {
@@ -644,7 +641,7 @@ async fn perform_file_updates(
                     paths_to_delete.push(old_path_abs.to_string_lossy().to_string());
                 }
             }
-        } else if status.contains(Status::INDEX_RENAMED) {
+        } else if status == Delta::Renamed {
             if let (Some(old_path_abs), Some(new_path_abs)) = (old_absolute_path, new_absolute_path)
             {
                 // Canonicalize AFTER confirming the new path starts with the canonical_folder_path prefix
