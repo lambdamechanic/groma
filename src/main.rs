@@ -45,7 +45,8 @@ const EMBEDDING_DIMENSION: u64 = 1536;
 /// The number of points to upsert to Qdrant in a single batch.
 const QDRANT_UPSERT_BATCH_SIZE: usize = 100;
 /// The target size for text chunks in tokens before embedding.
-const TARGET_CHUNK_SIZE_TOKENS: usize = 512;
+/// Aiming for the maximum supported by models like text-embedding-3-small (8192).
+const TARGET_CHUNK_SIZE_TOKENS: usize = 8192;
 
 // --- Command Line Arguments ---
 
