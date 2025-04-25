@@ -32,7 +32,7 @@ use qdrant_client::{
 use rig::{
     embeddings::{
         embed::{Embed, EmbedError, TextEmbedder},
-        embedding::EmbeddingModel,
+        embedding::{EmbeddingModel, OneOrMany}, // Added OneOrMany
         EmbeddingsBuilder,
     },
     providers::openai,
@@ -492,17 +492,19 @@ async fn main() -> Result<()> {
 
 /// Processes embedding results and adds corresponding PointStructs to the output vector.
 fn process_embedding_results(
-    embedding_results: &Vec<(LongDocument, Vec<rig::embeddings::embedding::Embedding>)>, // Borrow results
+    embedding_results: &Vec<(LongDocument, OneOrMany<rig::embeddings::embedding::Embedding>)>, // Accept OneOrMany
     all_points_to_upsert: &mut Vec<PointStruct>, // Mutably borrow the points vector
 ) -> Result<()> {
     debug!("Constructing Qdrant points from embedding results...");
-    for (long_document, embedding_result) in embedding_results.iter() { // Iterate over borrowed results
+    for (long_document, one_or_many_embeddings) in embedding_results.iter() { // Iterate over borrowed results
+        // Convert OneOrMany<Embedding> into Vec<Embedding> for consistent processing
+        let embedding_vec = one_or_many_embeddings.clone().into_vec(); // Clone to get owned Vec
         debug!(
             "Processing {} embedding(s) for document '{}'",
-            embedding_result.len(),
+            embedding_vec.len(),
             long_document.path_str,
         );
-        for (chunk_index, embedding) in embedding_result.iter().enumerate() { // Iterate over borrowed embeddings
+        for (chunk_index, embedding) in embedding_vec.iter().enumerate() { // Iterate over the converted Vec
             let chunk_uuid = generate_uuid_for_chunk(&long_document.path_str, chunk_index);
             let point_id = uuid_to_point_id(chunk_uuid);
 
