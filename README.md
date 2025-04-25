@@ -2,7 +2,12 @@
 
 Groma is a command-line tool that scans a folder within a Git repository, embeds the content of tracked files using OpenAI, stores these embeddings in a Qdrant vector database, and allows you to query for relevant files based on semantic similarity.
 
-## Why "Groma"?
+## Why Groma?
+
+I tend to use this with [aider](https://aider.chat). Aider has a repo-map feature, where it will include a succinct description of your repository in the prompt, but it rather falls over with massive monorepos.
+Groma lets you pay the indexing cost once, and then repair the indices incrementally as files change: this means that querying is usually free, once the embeddings are done, and you could share a qdrant instance between users to reduce costs further.
+
+## No, I mean, why "Groma"?
 <table border="0" cellspacing="0" style="border: none;">
 <tr>
 <td valign="top" style="border: none;">
@@ -68,7 +73,7 @@ You also need an OpenAI API key.
     *   `--openai-model <MODEL_NAME>`: (Optional) The OpenAI embedding model to use. Defaults to `text-embedding-3-small`.
     *   `--qdrant-url <URL>`: (Optional) The URL for the Qdrant gRPC endpoint. Defaults to `http://localhost:6334` or the `QDRANT_URL` environment variable.
     *   `--suppress-updates`: (Optional Flag) If present, skips the initial scan, embedding, and upserting steps. Useful if you only want to query existing data.
-    *   `--debug`: (Optional Flag) Enables detailed debug logging. By default, Groma produces no log output unless this flag is present or the `RUST_LOG` environment variable is set (e.g., `RUST_LOG=info`).
+    *   `--debug`: (Optional Flag) Enables detailed debug logging. 
 
     **Output:**
 
