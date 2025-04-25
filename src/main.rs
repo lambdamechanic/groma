@@ -587,11 +587,10 @@ async fn perform_file_updates(
                          warn!("Could not canonicalize new path for RENAMED file: {} -> {}", old_path_abs.display(), new_path_abs.display());
                     }
                 }
-            }
+            } // Closes the `else if status == Status::INDEX_RENAMED` block.
             // Note: The if/else if chain handles NEW, MODIFIED, TYPECHANGE, DELETED, RENAMED.
             // We implicitly ignore other statuses by not having an `else` block here.
             // The debug log for ignored statuses was removed as it was part of the old `_` match arm.
-        }
         // Note: We are ignoring other statuses like CONFLICTED, IGNORED, UNTRACKED, etc.
         // as they shouldn't appear in a tree-to-tree diff reflecting committed changes.
     } // Closes the `for delta in diff.deltas()` loop
