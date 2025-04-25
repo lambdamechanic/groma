@@ -499,7 +499,8 @@ fn process_embedding_results(
     debug!("Constructing Qdrant points from embedding results...");
     for (long_document, one_or_many_embeddings) in embedding_results.iter() { // Iterate over borrowed results
         // Convert OneOrMany<Embedding> into Vec<Embedding> for consistent processing
-        let embedding_vec = one_or_many_embeddings.clone().into_vec(); // Clone to get owned Vec
+        // Use into_iter() and collect() as into_vec() doesn't exist
+        let embedding_vec: Vec<_> = one_or_many_embeddings.clone().into_iter().collect();
         debug!(
             "Processing {} embedding(s) for document '{}'",
             embedding_vec.len(),
