@@ -8,9 +8,9 @@ use std::{
 };
 
 // External crate imports
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result}; // Added bail
 use clap::Parser;
-use git2::Repository;
+use git2::{DiffOptions, Oid, Repository, Status}; // Added DiffOptions, Oid, Status
 use hex; // Added for encoding hashes
 use qdrant_client::{
     qdrant::{
@@ -28,7 +28,8 @@ use rig::{
     },
     providers::openai,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize}; // Already present, used for FileMetadata and now GromaState
+use serde_json; // Added for state serialization
 use sha2::{Digest, Sha256};
 use text_splitter::TextSplitter;
 use tiktoken_rs::{cl100k_base, CoreBPE};
@@ -96,6 +97,12 @@ struct FileMetadata {
     hash: String,
     /// The 0-based index of this chunk within the original file.
     chunk_index: usize,
+}
+
+/// Stores the state between runs, specifically the last processed Git commit OID.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct GromaState {
+    last_processed_oid: String,
 }
 
 /// Represents a document (file) to be processed and embedded.
@@ -227,51 +234,45 @@ async fn ensure_qdrant_collection(client: Arc<Qdrant>, collection_name: &str) ->
     Ok(())
 }
 
-/// Scans the specified folder for files tracked by Git.
-/// Returns a list of canonical `PathBuf`s for the tracked files within that folder.
-fn scan_folder(folder_path: &Path) -> Result<Vec<PathBuf>> {
-    info!("Scanning for Git tracked files in: {}", folder_path.display());
+// --- State Management ---
 
-    // Discover the git repository containing the folder_path
-    let repo = Repository::discover(folder_path)
-        .with_context(|| format!("Failed to find Git repository containing path: {}", folder_path.display()))?;
-
-    let workdir = repo.workdir().ok_or_else(|| anyhow!("Git repository is bare, cannot list files in workdir"))?;
-    info!("Found Git repository at: {}", workdir.display());
-
-    // Ensure the input folder_path is absolute for correct prefix matching later
-    let absolute_folder_path = fs::canonicalize(folder_path)?;
-
-    let mut tracked_files = Vec::new();
-    let index = repo.index().context("Failed to get repository index")?;
-
-    for entry in index.iter() {
-        // entry.path is relative to the repository root
-        let repo_relative_path = PathBuf::from(String::from_utf8_lossy(&entry.path).as_ref());
-        // Construct the absolute path on the filesystem
-        let absolute_path = workdir.join(&repo_relative_path);
-
-        // Check if the file exists and is within the target folder subtree
-        if absolute_path.is_file() && absolute_path.starts_with(&absolute_folder_path) {
-            // Canonicalize the path for consistency before storing
-            match fs::canonicalize(&absolute_path) {
-                Ok(canonical_path) => tracked_files.push(canonical_path),
-                Err(e) => warn!(
-                    "Could not canonicalize path for tracked file '{}': {}. Skipping.",
-                    absolute_path.display(), e
-                ),
-            }
-        }
-    }
-
-    if tracked_files.is_empty() {
-        warn!("No tracked files found within the specified folder: {}", folder_path.display());
-    } else {
-        info!("Found {} tracked files in the specified folder.", tracked_files.len());
-    }
-
-    Ok(tracked_files)
+/// Returns the expected path for the .gromastate file within the repository's .git directory.
+fn get_state_file_path(repo: &Repository) -> Result<PathBuf> {
+    Ok(repo.path().join(".gromastate")) // Store state inside .git folder
 }
+
+/// Loads the GromaState from the .gromastate file.
+/// Returns Ok(None) if the file doesn't exist (first run).
+fn load_state(repo: &Repository) -> Result<Option<GromaState>> {
+    let state_file_path = get_state_file_path(repo)?;
+    if !state_file_path.exists() {
+        info!("No previous state file found at '{}'. Assuming first run.", state_file_path.display());
+        return Ok(None);
+    }
+
+    debug!("Loading state from '{}'", state_file_path.display());
+    let file = fs::File::open(&state_file_path)
+        .with_context(|| format!("Failed to open state file: {}", state_file_path.display()))?;
+    let state: GromaState = serde_json::from_reader(io::BufReader::new(file))
+        .with_context(|| format!("Failed to deserialize state from: {}", state_file_path.display()))?;
+    info!("Loaded previous state (OID: {})", state.last_processed_oid);
+    Ok(Some(state))
+}
+
+/// Saves the given GromaState to the .gromastate file.
+fn save_state(repo: &Repository, state: &GromaState) -> Result<()> {
+    let state_file_path = get_state_file_path(repo)?;
+    debug!("Saving current state (OID: {}) to '{}'", state.last_processed_oid, state_file_path.display());
+    let file = fs::File::create(&state_file_path)
+        .with_context(|| format!("Failed to create state file: {}", state_file_path.display()))?;
+    serde_json::to_writer_pretty(io::BufWriter::new(file), state)
+        .with_context(|| format!("Failed to serialize state to: {}", state_file_path.display()))?;
+    info!("Saved current state (OID: {})", state.last_processed_oid);
+    Ok(())
+}
+
+
+// --- Hashing & Qdrant Interaction (mostly unchanged) ---
 
 /// Calculates the SHA256 hash of a file's content.
 fn calculate_hash(file_path: &Path) -> Result<String> {
@@ -286,7 +287,10 @@ fn calculate_hash(file_path: &Path) -> Result<String> {
 
 /// Fetches the stored hash for *one* chunk associated with the given file path
 /// from the Qdrant collection. Returns `Ok(None)` if no chunk is found for the path.
+/// Note: This is less critical now as we rely on Git diff, but can be useful for double-checking
+/// if a file marked as 'Modified' actually existed before.
 async fn get_existing_file_hash(client: Arc<Qdrant>, collection_name: &str, path_str: &str) -> Result<Option<String>> {
+    debug!("Checking Qdrant for existing hash for path: {}", path_str);
     // Filter points where the 'path' payload field matches the given path_str
     let filter = Filter::must([Condition::matches(
         "path",
@@ -343,13 +347,13 @@ async fn delete_points_by_path(client: Arc<Qdrant>, collection_name: &str, path_
 }
 
 /// Upserts a batch of points into the specified Qdrant collection.
-async fn upsert_batch(client: Arc<Qdrant>, collection_name: &str, points: &[PointStruct]) -> Result<()> {
+async fn upsert_batch(client: Arc<Qdrant>, collection_name: &str, points: Vec<PointStruct>) -> Result<()> { // Takes ownership now
     if points.is_empty() {
         return Ok(());
     }
     client
         .upsert_points(
-            UpsertPointsBuilder::new(collection_name, points.to_vec())
+            UpsertPointsBuilder::new(collection_name, points) // Use owned points directly
             // .wait(true) // Optionally wait for operation to complete
         )
         .await
@@ -388,16 +392,23 @@ async fn main() -> Result<()> {
     info!("Using Qdrant collection: {}", collection_name);
     ensure_qdrant_collection(qdrant_client.clone(), &collection_name).await?;
 
-    // 5. Perform File Updates (Scan, Embed, Upsert) if not suppressed
+    // 5. Discover Repository and Perform File Updates if not suppressed
+    let repo = Repository::discover(&args.folder)
+        .with_context(|| format!("Failed to find Git repository containing path: {}", args.folder.display()))?;
+    let workdir = repo.workdir().ok_or_else(|| anyhow!("Git repository is bare, cannot process files"))?;
+    info!("Found Git repository at: {}", workdir.display());
+
     if !args.suppress_updates {
         perform_file_updates(
             &args,
+            &repo, // Pass repository reference
             qdrant_client.clone(),
             embedding_model.clone(),
             &collection_name,
+            &canonical_folder_path, // Pass canonical folder path
         ).await?;
     } else {
-         info!("Skipping file updates (--suppress-updates specified).");
+        info!("Skipping file updates (--suppress-updates specified).");
     }
 
     // 6. Process User Query (Read, Embed, Search, Format Output)
@@ -410,92 +421,209 @@ async fn main() -> Result<()> {
     ).await?;
 
     Ok(())
-}
-
-
-/// Handles the core logic for scanning files, embedding changes, and upserting to Qdrant.
+/// Handles the core logic for detecting file changes using Git, embedding changes, and upserting to Qdrant.
 async fn perform_file_updates(
     args: &Args,
+    repo: &Repository, // Use Git repository
     qdrant_client: Arc<Qdrant>,
     embedding_model: Arc<openai::EmbeddingModel>,
     collection_name: &str,
+    canonical_folder_path: &Path, // Base path for filtering and relative paths
 ) -> Result<()> {
-    info!("Checking for file updates and processing changes...");
+    info!("Checking for file updates using Git and processing changes...");
+
+    let workdir = repo.workdir().ok_or_else(|| anyhow!("Git repository is bare, cannot process files"))?;
+
+    // --- Phase 1: Load State & Determine Git Diff ---
+    let previous_state = load_state(repo)?;
+    let head_commit_oid = repo.head()?.peel_to_commit()?.id();
+    info!("Current HEAD OID: {}", head_commit_oid);
+
+    let previous_tree = match previous_state {
+        Some(ref state) => {
+            let oid = Oid::from_str(&state.last_processed_oid)?;
+            match repo.find_commit(oid)?.tree() {
+                Ok(tree) => Some(tree),
+                Err(e) => {
+                    warn!("Failed to find tree for previous OID {}: {}. Processing all files.", state.last_processed_oid, e);
+                    None // Fallback to processing all if previous commit/tree is missing
+                }
+            }
+        }
+        None => None, // First run, compare against empty tree
+    };
+
+    // Diff HEAD against the previous tree (or empty tree if first run)
+    // We compare against the committed state (HEAD) to ensure reproducibility.
+    // Changes in the working directory or index that are not committed yet won't be processed.
+    let current_tree = repo.head()?.peel_to_tree()?;
+    let mut diff_opts = DiffOptions::new();
+    diff_opts.include_renames(true);
+    diff_opts.include_type_change(true);
+    // Convert the target folder path to be relative to the workdir for pathspec
+    let pathspec = args.folder.strip_prefix(workdir).unwrap_or(&args.folder);
+    diff_opts.pathspec(pathspec); // Limit diff to the target folder relative to repo root
+    info!("Using pathspec for diff: {}", pathspec.display());
+
+
+    let diff = repo.diff_tree_to_tree(previous_tree.as_ref(), Some(&current_tree), Some(&mut diff_opts))?;
+
+    info!("Git diff found {} changed items potentially within the target folder.", diff.deltas().len());
 
     let text_splitter = create_text_splitter().context("Failed to create text splitter")?;
     let mut documents_to_embed: Vec<LongDocument> = Vec::new();
-    let mut total_skipped_files = 0;
-    let mut total_failed_files = 0;
-    let mut files_requiring_processing = 0;
+    let mut paths_to_delete: Vec<String> = Vec::new();
+    let mut processed_new_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new(); // Track processed adds/renames
+    let mut processed_count = 0;
 
-    // --- Phase 1: Scan files, check hashes, collect documents ---
-    let files_to_scan = scan_folder(&args.folder)?;
-    info!("Found {} tracked files to potentially process.", files_to_scan.len());
-    info!("Scanning files for changes and collecting content...");
+    // --- Phase 2: Process Diff Deltas ---
+    for delta in diff.deltas() {
+        let status = delta.status();
+        let old_repo_path = delta.old_file().path(); // Path relative to repo root
+        let new_repo_path = delta.new_file().path(); // Path relative to repo root
 
-    for file_path in files_to_scan {
-        let path_str = file_path.to_string_lossy().to_string();
-        let path_for_error_reporting = path_str.clone(); // Clone for potential error messages
+        // Construct absolute paths based on workdir
+        let old_absolute_path = old_repo_path.map(|p| workdir.join(p));
+        let new_absolute_path = new_repo_path.map(|p| workdir.join(p));
 
-        // Process each file in an async block for easier error handling per file
-        match async {
-            debug!("Checking file: {}", path_str);
-            let current_hash = calculate_hash(&file_path)?;
-            let existing_hash = get_existing_file_hash(qdrant_client.clone(), collection_name, &path_str).await?;
+        // --- Crucial Filter: Ensure the *new* path (for Add/Modify/Rename) or *old* path (for Delete)
+        // --- is actually within the *canonical target folder*. Git's pathspec is prefix-based
+        // --- and might include files outside the exact target folder if names overlap.
+        let relevant_path_for_filter = match status {
+             Status::DELETED => old_absolute_path.as_ref(),
+             _ => new_absolute_path.as_ref(), // ADDED, MODIFIED, RENAMED, TYPECHANGE etc.
+        };
 
-            // Skip if hash matches (and exists)
-            if Some(&current_hash) == existing_hash.as_ref() {
-                debug!("File hash matches, skipping: {}", path_str);
-                return Ok(false); // Indicate file was skipped (no change)
+        if relevant_path_for_filter.map_or(true, |p| !p.starts_with(canonical_folder_path)) {
+             debug!(
+                 "Skipping delta outside target folder (canonical check): old={:?}, new={:?}, status={:?}",
+                 old_repo_path, new_repo_path, status
+             );
+             continue;
+        }
+        // --- End Filter ---
+
+        processed_count += 1; // Count files actually processed after filtering
+
+        match status {
+            Status::ADDED | Status::MODIFIED | Status::TYPECHANGE => {
+                if let Some(new_path_abs) = new_absolute_path {
+                    // Canonicalize AFTER confirming it starts with the canonical_folder_path prefix
+                    if let Ok(canonical_new) = fs::canonicalize(&new_path_abs) {
+                        let path_str = canonical_new.to_string_lossy().to_string();
+                        info!("Detected ADDED/MODIFIED/TYPECHANGE: {}", path_str);
+                        processed_new_paths.insert(canonical_new.clone()); // Track this path
+
+                        // If modified/typechange, ensure old points are deleted (using canonical path)
+                        // This handles cases where filename case might change but path object differs
+                        if status == Status::MODIFIED || status == Status::TYPECHANGE {
+                             if let Some(old_path_abs) = old_absolute_path.as_ref() {
+                                // Attempt to canonicalize the old path for deletion consistency
+                                if let Ok(canonical_old) = fs::canonicalize(old_path_abs) {
+                                    paths_to_delete.push(canonical_old.to_string_lossy().to_string());
+                                } else {
+                                     // If canonicalization fails (e.g., file already gone), use the absolute path string
+                                     warn!("Could not canonicalize old path for MODIFIED/TYPECHANGE file: {}. Using non-canonical path for deletion.", old_path_abs.display());
+                                     paths_to_delete.push(old_path_abs.to_string_lossy().to_string());
+                                }
+                             }
+                        }
+
+                        // Process the new/modified file content for embedding
+                        match process_file_for_embedding(&canonical_new, &text_splitter) {
+                            Ok(Some(doc)) => documents_to_embed.push(doc),
+                            Ok(None) => info!("Skipping empty or unreadable file: {}", path_str), // Empty file case
+                            Err(e) => warn!("Failed processing ADDED/MODIFIED/TYPECHANGE file {}: {}", path_str, e),
+                        }
+                    } else {
+                        warn!("Could not canonicalize new path for ADDED/MODIFIED/TYPECHANGE file: {}", new_path_abs.display());
+                    }
+                }
             }
-
-            info!("File is new or hash changed. Preparing content for: {}", path_str);
-            files_requiring_processing += 1;
-
-            // Delete existing points for this path if it existed before
-            if existing_hash.is_some() {
-                delete_points_by_path(qdrant_client.clone(), collection_name, &path_str).await?;
+            Status::DELETED => {
+                if let Some(old_path_abs) = old_absolute_path {
+                     // Attempt to canonicalize the path for deletion consistency
+                     if let Ok(canonical_old) = fs::canonicalize(&old_path_abs) {
+                        let path_str = canonical_old.to_string_lossy().to_string();
+                        info!("Detected DELETED: {}", path_str);
+                        paths_to_delete.push(path_str);
+                     } else {
+                         // If canonicalization fails (file is already gone), use the absolute path string
+                         warn!("Could not canonicalize path for DELETED file: {}. Using non-canonical path for deletion.", old_path_abs.display());
+                         paths_to_delete.push(old_path_abs.to_string_lossy().to_string());
+                     }
+                }
             }
+            Status::RENAMED => {
+                if let (Some(old_path_abs), Some(new_path_abs)) = (old_absolute_path, new_absolute_path) {
+                    // Canonicalize AFTER confirming the new path starts with the canonical_folder_path prefix
+                    if let Ok(canonical_new) = fs::canonicalize(&new_path_abs) {
+                        let new_path_str = canonical_new.to_string_lossy().to_string();
+                        processed_new_paths.insert(canonical_new.clone()); // Track this path
 
-            // Read content, skip if empty after trimming
-            let content = fs::read_to_string(&file_path)
-                .with_context(|| format!("Failed to read file content: {}", file_path.display()))?;
-            if content.trim().is_empty() {
-                warn!("Skipping empty file: {}", path_str);
-                return Ok(false); // Indicate file was skipped (empty)
+                        // Attempt to canonicalize the old path for deletion consistency
+                        let old_path_str_for_delete = match fs::canonicalize(&old_path_abs) {
+                             Ok(canonical_old) => canonical_old.to_string_lossy().to_string(),
+                             Err(_) => {
+                                 warn!("Could not canonicalize old path for RENAMED file: {}. Using non-canonical path for deletion.", old_path_abs.display());
+                                 old_path_abs.to_string_lossy().to_string()
+                             }
+                        };
+
+                        info!("Detected RENAMED: {} -> {}", old_path_str_for_delete, new_path_str);
+
+                        // Simple approach: Delete old, process new as ADDED
+                        paths_to_delete.push(old_path_str_for_delete);
+                        match process_file_for_embedding(&canonical_new, &text_splitter) {
+                            Ok(Some(doc)) => documents_to_embed.push(doc),
+                            Ok(None) => info!("Skipping empty or unreadable renamed file: {}", new_path_str),
+                            Err(e) => warn!("Failed processing RENAMED file {}: {}", new_path_str, e),
+                        }
+                    } else {
+                         warn!("Could not canonicalize new path for RENAMED file: {} -> {}", old_path_abs.display(), new_path_abs.display());
+                    }
+                }
             }
-
-            // Add document to the list for batch embedding
-            documents_to_embed.push(LongDocument {
-                path_str: path_str.clone(),
-                current_hash,
-                content,
-                text_splitter: &text_splitter,
-            });
-
-            Ok(true) // Indicate file content was collected for processing
-        }.await {
-            Ok(processed) => {
-                if !processed { total_skipped_files += 1; }
-            }
-            Err::<bool, anyhow::Error>(e) => { // Explicit type annotation for turbofish
-                warn!("Failed initial processing for file {}: {}", path_for_error_reporting, e);
-                total_failed_files += 1;
+            // Ignore other statuses like CONFLICTED, IGNORED, UNTRACKED, etc.
+            _ => {
+                 debug!("Ignoring Git status {:?} for old={:?}, new={:?}", status, old_repo_path, new_repo_path);
             }
         }
     }
+    info!("Finished processing {} Git diff deltas relevant to the target folder.", processed_count);
 
-    info!(
-        "File scanning complete. Files needing processing: {}, Skipped (up-to-date/empty): {}, Failed initial scan: {}",
-        files_requiring_processing, total_skipped_files, total_failed_files
-    );
 
-    // --- Phase 2 & 3: Batch Embed and Create Points ---
+    // --- Phase 3: Delete Obsolete Points ---
+    // Deduplicate paths to delete before executing deletions
+    paths_to_delete.sort();
+    paths_to_delete.dedup();
+    if !paths_to_delete.is_empty() {
+        info!("Deleting points for {} removed/modified/renamed paths...", paths_to_delete.len());
+        for path_str in paths_to_delete {
+            // Ensure we don't delete paths that were immediately re-added (e.g., case-only rename on some systems)
+            // This check might be overly cautious depending on exact diff behavior but safer.
+            let path_buf = PathBuf::from(&path_str);
+            if processed_new_paths.contains(&path_buf) {
+                 debug!("Skipping deletion for path that was also added/renamed in this run: {}", path_str);
+                 continue;
+            }
+            if let Err(e) = delete_points_by_path(qdrant_client.clone(), collection_name, &path_str).await {
+                warn!("Failed to delete points for path {}: {}", path_str, e);
+            }
+        }
+    } else {
+        info!("No points marked for deletion.");
+    }
+
+
+    // --- Phase 4 & 5: Batch Embed and Create Points ---
     let mut all_points_to_upsert: Vec<PointStruct> = Vec::new();
     if !documents_to_embed.is_empty() {
-        info!("Starting batch embedding for {} documents...", documents_to_embed.len());
+        info!("Starting batch embedding for {} added/modified/renamed documents...", documents_to_embed.len());
+        // Need to pass the owned documents to the builder
+        let docs_for_builder: Vec<LongDocument> = documents_to_embed; // Move ownership
         let embedding_results = EmbeddingsBuilder::new((*embedding_model).clone())
-            .documents(documents_to_embed)?
+            .documents(docs_for_builder)? // Pass owned Vec
             .build()
             .await
             .context("Failed to generate embeddings using EmbeddingsBuilder")?;
@@ -510,7 +638,7 @@ async fn perform_file_updates(
 
                 let metadata = FileMetadata {
                     path: long_document.path_str.clone(),
-                    hash: long_document.current_hash.clone(),
+                    hash: long_document.current_hash.clone(), // Store the full file hash
                     chunk_index,
                 };
                 let payload: Payload = match serde_json::to_value(metadata)
@@ -535,15 +663,17 @@ async fn perform_file_updates(
         info!("No documents require embedding.");
     }
 
-    // --- Phase 4: Batch Upsert All Collected Points ---
+    // --- Phase 6: Batch Upsert All Collected Points ---
     if !all_points_to_upsert.is_empty() {
         info!(
             "Starting batch upsert of {} total points to collection '{}'...",
             all_points_to_upsert.len(),
             collection_name
         );
-        for chunk in all_points_to_upsert.chunks(QDRANT_UPSERT_BATCH_SIZE) {
+        // Upsert in batches
+        for chunk in all_points_to_upsert.chunks(QDRANT_UPSERT_BATCH_SIZE).map(|c| c.to_vec()) {
              debug!("Upserting batch of {} points...", chunk.len());
+             // Pass ownership of the chunk Vec to upsert_batch
              upsert_batch(qdrant_client.clone(), collection_name, chunk).await?;
         }
         info!("Finished upserting points.");
@@ -551,7 +681,56 @@ async fn perform_file_updates(
         info!("No new points to upsert.");
     }
 
+    // --- Phase 7: Save State ---
+    // Only save state if the diff processing and upserting seemed successful
+    // (Error handling within the loops might allow partial success, consider if this is desired)
+    let current_state = GromaState {
+        last_processed_oid: head_commit_oid.to_string(),
+    };
+    save_state(repo, &current_state)?;
+
     Ok(())
+}
+
+/// Helper function to read, hash, and prepare a single file for embedding.
+/// Returns Ok(None) if the file is empty or cannot be read.
+fn process_file_for_embedding<'a>(
+    file_path: &Path,
+    text_splitter: &'a TextSplitter<CoreBPE>, // Borrow splitter
+) -> Result<Option<LongDocument<'a>>> {
+    let path_str = file_path.to_string_lossy().to_string();
+    let path_for_error = path_str.clone(); // Clone for error context
+
+    // Check if it's actually a file and not a directory/symlink etc. before reading
+    if !file_path.is_file() {
+        warn!("Path is not a file: {}. Skipping.", path_str);
+        return Ok(None);
+    }
+
+    match fs::read_to_string(file_path) {
+        Ok(content) => {
+            if content.trim().is_empty() {
+                warn!("Skipping empty file: {}", path_str);
+                Ok(None) // Skip empty files
+            } else {
+                // Calculate hash only if content is read successfully
+                let current_hash = calculate_hash(file_path)
+                    .with_context(|| format!("Failed to calculate hash for {}", path_for_error))?;
+
+                Ok(Some(LongDocument {
+                    path_str,
+                    current_hash,
+                    content,
+                    text_splitter, // Pass borrowed splitter
+                }))
+            }
+        }
+        Err(e) => {
+            // Log error but return Ok(None) to allow skipping problematic files
+            warn!("Failed to read file content for {}: {}. Skipping file.", path_for_error, e);
+            Ok(None)
+        }
+    }
 }
 
 

@@ -19,7 +19,7 @@ anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = "1.0" # For state serialization
 futures = "0.3"
 # tabled = "0.15" # Removed tabled dependency
 uuid = { version = "1.16.0", features = ["v5"] } # Update UUID and enable v5 for path hashing
