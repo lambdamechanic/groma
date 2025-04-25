@@ -502,24 +502,22 @@ async fn perform_file_updates(
     // Diff HEAD against the previous tree (or empty tree if first run)
     // We compare against the committed state (HEAD) to ensure reproducibility.
     // Changes in the working directory or index that are not committed yet won't be processed.
-    info!("Stage [Update]: Calculating Git diff...");
-    let current_tree = repo.head()?.peel_to_tree()?;
+    info!("Stage [Update]: Calculating Git diff against working directory...");
+    // Compare the previous tree state (or empty if first run) against the current working directory
     let mut diff_opts = DiffOptions::new();
-    // diff_opts.include_renames(true); // Rename detection is often default or handled differently
-    diff_opts.include_typechange(true); // Correct method name
+    diff_opts.include_ignored(false); // Don't include ignored files
+    diff_opts.include_untracked(false); // Don't include untracked files
+    diff_opts.include_typechange(true); // Detect type changes (file to dir etc.)
                                         // Convert the target folder path to be relative to the workdir for pathspec
     let pathspec = args.folder.strip_prefix(workdir).unwrap_or(&args.folder);
     diff_opts.pathspec(pathspec); // Limit diff to the target folder relative to repo root
     info!("Using pathspec for diff: {}", pathspec.display());
 
-    let diff = repo.diff_tree_to_tree(
-        previous_tree.as_ref(),
-        Some(&current_tree),
-        Some(&mut diff_opts),
-    )?;
+    // Use diff_tree_to_workdir to compare the last indexed tree state with the current working directory files
+    let diff = repo.diff_tree_to_workdir(previous_tree.as_ref(), Some(&mut diff_opts))?;
 
     info!(
-        "Git diff found {} changed items potentially within the target folder.",
+        "Git diff (vs workdir) found {} changed items potentially within the target folder.",
         diff.deltas().len()
     );
     info!("Stage [Update]: Git diff calculated.");
