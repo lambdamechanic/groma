@@ -539,8 +539,8 @@ async fn perform_file_updates(
         info!("Stage [Update]: First run detected. Processing all tracked files in target folder...");
         let current_tree = repo.head()?.peel_to_tree()?;
         current_tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
-            if let Some(entry_path) = entry.path() {
-                let full_path = workdir.join(root).join(entry_path);
+            if let Some(entry_name) = entry.name() { // Use name() instead of path()
+                let full_path = workdir.join(root).join(entry_name); // Construct full path
                 // Filter: Ensure the path is within the canonical target folder
                 if full_path.starts_with(canonical_folder_path) && entry.kind() == Some(git2::ObjectType::Blob) {
                     if let Ok(canonical_path) = fs::canonicalize(&full_path) {
