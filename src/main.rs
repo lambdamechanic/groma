@@ -54,12 +54,13 @@ use uuid::Uuid;
 const EMBEDDING_DIMENSION: u64 = 1536;
 /// The number of points to upsert to Qdrant in a single batch.
 const QDRANT_UPSERT_BATCH_SIZE: usize = 100;
-/// The number of *documents* to send to the embedding API in a single batch.
-/// Adjust this based on typical document size and API rate limits.
-const EMBEDDING_BATCH_SIZE: usize = 10; // Start with a conservative value
 /// The target size for text chunks in tokens before embedding.
 /// Aiming for the maximum supported by models like text-embedding-3-small (8192).
 const TARGET_CHUNK_SIZE_TOKENS: usize = 8192;
+/// Maximum number of tokens to include in a single request to the embedding API.
+/// This helps avoid hitting rate limits (e.g., OpenAI's 1,000,000 TPM for text-embedding-3-small).
+/// Set significantly lower than the TPM limit to allow multiple requests per minute.
+const MAX_TOKENS_PER_EMBEDDING_REQUEST: usize = 500_000;
 
 // --- Command Line Arguments ---
 
@@ -488,6 +489,51 @@ async fn main() -> Result<()> {
     Ok(())
 } // Close main function block here
 
+
+/// Processes embedding results and adds corresponding PointStructs to the output vector.
+fn process_embedding_results(
+    embedding_results: &Vec<(LongDocument, Vec<rig::embeddings::embedding::Embedding>)>, // Borrow results
+    all_points_to_upsert: &mut Vec<PointStruct>, // Mutably borrow the points vector
+) -> Result<()> {
+    debug!("Constructing Qdrant points from embedding results...");
+    for (long_document, embedding_result) in embedding_results.iter() { // Iterate over borrowed results
+        debug!(
+            "Processing {} embedding(s) for document '{}'",
+            embedding_result.len(),
+            long_document.path_str,
+        );
+        for (chunk_index, embedding) in embedding_result.iter().enumerate() { // Iterate over borrowed embeddings
+            let chunk_uuid = generate_uuid_for_chunk(&long_document.path_str, chunk_index);
+            let point_id = uuid_to_point_id(chunk_uuid);
+
+            let metadata = FileMetadata {
+                path: long_document.path_str.clone(),
+                hash: long_document.current_hash.clone(), // Store the full file hash
+                chunk_index,
+            };
+            let payload: Payload = match serde_json::to_value(metadata)
+                .context("Failed to serialize metadata")?
+                .try_into()
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Failed to convert metadata JSON to Qdrant Payload for chunk {} of {}: {}", chunk_index, long_document.path_str, e);
+                    continue; // Skip this point
+                }
+            };
+
+            // Convert f64 embedding from rig to f32 for Qdrant
+            let vector_f32: Vec<f32> = embedding.vec.iter().map(|&v| v as f32).collect(); // Borrow v
+            let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
+            let point = PointStruct::new(point_id, vectors, payload);
+            all_points_to_upsert.push(point);
+        }
+    }
+    debug!("Finished constructing points for this batch.");
+    Ok(())
+}
+
+
 /// Handles the core logic for detecting file changes using Git, embedding changes, and upserting to Qdrant.
 async fn perform_file_updates(
     args: &Args,
@@ -764,100 +810,122 @@ async fn perform_file_updates(
     }
     info!("Stage [Update]: Finished deletion of obsolete Qdrant points.");
 
-    // --- Phase 4 & 5: Batch Embed and Create Points ---
-    info!("Stage [Update]: Starting batch embedding and point creation...");
+    // --- Phase 4 & 5: Batch Embed (Token-Based) and Create Points ---
+    info!("Stage [Update]: Starting token-based batch embedding and point creation...");
     let mut all_points_to_upsert: Vec<PointStruct> = Vec::new();
+
     if !documents_to_embed.is_empty() {
         info!(
-            "Starting embedding for {} documents in batches of {}...",
+            "Processing {} documents for embedding, batching by token limit ({} tokens/request)...",
             documents_to_embed.len(),
-            EMBEDDING_BATCH_SIZE
+            MAX_TOKENS_PER_EMBEDDING_REQUEST
         );
 
-        // Process documents in batches for embedding
-        for (batch_index, doc_batch) in documents_to_embed
-            .chunks(EMBEDDING_BATCH_SIZE)
-            .enumerate()
-        {
-            info!(
-                "Processing embedding batch {} ({} documents)...",
-                batch_index + 1,
-                doc_batch.len()
-            );
-
-            // Need to pass owned documents to the builder for this batch
-            // We clone the necessary data from the LongDocument references
-            let docs_for_builder: Vec<LongDocument> = doc_batch
-                .iter()
-                .map(|doc_ref| LongDocument {
-                    path_str: doc_ref.path_str.clone(),
-                    current_hash: doc_ref.current_hash.clone(),
-                    content: doc_ref.content.clone(),
-                    tokenizer: doc_ref.tokenizer, // Reference is fine here
-                })
-                .collect();
-
-            let embedding_results = EmbeddingsBuilder::new((*embedding_model).clone())
-                .documents(docs_for_builder)? // Pass owned Vec for the batch
-                .build()
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to generate embeddings for batch {}",
-                        batch_index + 1
-                    )
-                })?;
-            info!(
-                "Successfully generated embeddings for batch {}.",
-                batch_index + 1
-            );
-
-            debug!("Constructing Qdrant points from batch {} embeddings...", batch_index + 1);
-            for (long_document, embedding_result) in embedding_results.into_iter() {
-                debug!(
-                    "Processing {} embedding(s) for document '{}' (from batch {})",
-                    embedding_result.len(),
-                    long_document.path_str,
-                    batch_index + 1 // Added missing argument
-                );
-            for (chunk_index, embedding) in embedding_result.into_iter().enumerate() {
-                let chunk_uuid = generate_uuid_for_chunk(&long_document.path_str, chunk_index);
-                let point_id = uuid_to_point_id(chunk_uuid);
-
-                let metadata = FileMetadata {
-                    path: long_document.path_str.clone(),
-                    hash: long_document.current_hash.clone(), // Store the full file hash
-                    chunk_index,
-                };
-                let payload: Payload = match serde_json::to_value(metadata)
-                    .context("Failed to serialize metadata")?
-                    .try_into()
-                {
-                    Ok(p) => p,
-                    Err(e) => {
-                        error!("Failed to convert metadata JSON to Qdrant Payload for chunk {} of {}: {}", chunk_index, long_document.path_str, e);
-                        continue; // Skip this point
-                    }
-                };
-
-                // Convert f64 embedding from rig to f32 for Qdrant
-                let vector_f32: Vec<f32> = embedding.vec.into_iter().map(|v| v as f32).collect();
-                let vectors: qdrant_client::qdrant::Vectors = vector_f32.into();
-                let point = PointStruct::new(point_id, vectors, payload);
-                all_points_to_upsert.push(point);
-            }
+        // Temporary structure to hold data needed for batching without tokenizer reference
+        struct DocForBatch {
+            path_str: String,
+            current_hash: String,
+            content: String,
         }
-        info!(
-            "Finished constructing points for batch {}. Total points so far: {}",
-            batch_index + 1,
-            all_points_to_upsert.len()
-        );
-        } // End of batch loop
+
+        let mut current_batch_docs: Vec<DocForBatch> = Vec::new();
+        let mut current_batch_tokens: usize = 0;
+
+        for doc in documents_to_embed { // Consumes the vector
+            let tokens = tokenizer.encode_ordinary(&doc.content);
+            let doc_token_count = tokens.len();
+
+            // Skip documents that are themselves too large for a single request
+            if doc_token_count > MAX_TOKENS_PER_EMBEDDING_REQUEST {
+                warn!("Skipping document {} because its token count ({}) exceeds the per-request limit ({})",
+                      doc.path_str, doc_token_count, MAX_TOKENS_PER_EMBEDDING_REQUEST);
+                continue;
+            }
+
+            // If adding the current document would exceed the token limit, process the existing batch first.
+            if !current_batch_docs.is_empty() && current_batch_tokens + doc_token_count > MAX_TOKENS_PER_EMBEDDING_REQUEST {
+                info!(
+                    "Processing embedding batch. Token count: {}, Document count: {}",
+                    current_batch_tokens, current_batch_docs.len()
+                );
+
+                // Convert DocForBatch back to LongDocument for EmbeddingsBuilder
+                let batch_long_docs: Vec<LongDocument> = current_batch_docs.iter().map(|d| LongDocument {
+                    path_str: d.path_str.clone(),
+                    current_hash: d.current_hash.clone(),
+                    content: d.content.clone(),
+                    tokenizer, // Pass the reference
+                }).collect();
+
+                // Call embedding API
+                match EmbeddingsBuilder::new((*embedding_model).clone())
+                    .documents(batch_long_docs)? // Pass owned Vec for the batch
+                    .build()
+                    .await {
+                        Ok(embedding_results) => {
+                             info!("Successfully generated embeddings for batch.");
+                             // Process results and add points to all_points_to_upsert
+                             process_embedding_results(&embedding_results, &mut all_points_to_upsert)?;
+                             info!("Finished constructing points for batch. Total points so far: {}", all_points_to_upsert.len());
+                        },
+                        Err(e) => {
+                            // Log the error and continue to the next batch, or propagate?
+                            // Propagating seems safer to indicate failure.
+                             error!("Failed to generate embeddings for batch: {}", e);
+                             return Err(anyhow!("Failed to generate embeddings for batch: {}", e)
+                                        .context("Error during token-based batch embedding processing"));
+                        }
+                    }
+
+                // Clear the batch for the next set of documents
+                current_batch_docs.clear();
+                current_batch_tokens = 0;
+            }
+
+            // Add the current document to the batch
+            current_batch_tokens += doc_token_count;
+            current_batch_docs.push(DocForBatch {
+                path_str: doc.path_str, // Move strings
+                current_hash: doc.current_hash, // Move strings
+                content: doc.content, // Move strings
+            });
+        }
+
+        // --- Process the final batch if any documents remain ---
+        if !current_batch_docs.is_empty() {
+            info!(
+                "Processing final embedding batch. Token count: {}, Document count: {}",
+                current_batch_tokens, current_batch_docs.len()
+            );
+            let final_batch_long_docs: Vec<LongDocument> = current_batch_docs.iter().map(|d| LongDocument {
+                path_str: d.path_str.clone(),
+                current_hash: d.current_hash.clone(),
+                content: d.content.clone(),
+                tokenizer,
+            }).collect();
+
+            match EmbeddingsBuilder::new((*embedding_model).clone())
+                .documents(final_batch_long_docs)?
+                .build()
+                .await {
+                    Ok(embedding_results) => {
+                         info!("Successfully generated embeddings for final batch.");
+                         process_embedding_results(&embedding_results, &mut all_points_to_upsert)?;
+                         info!("Finished constructing points for final batch. Total points so far: {}", all_points_to_upsert.len());
+                    },
+                    Err(e) => {
+                         error!("Failed to generate embeddings for final batch: {}", e);
+                         return Err(anyhow!("Failed to generate embeddings for final batch: {}", e)
+                                    .context("Error during final token-based batch embedding processing"));
+                    }
+                }
+        }
 
         info!(
-            "Finished constructing {} total points from all batches.",
+            "Finished embedding and constructing {} total points from all batches.",
             all_points_to_upsert.len()
         );
+
     } else {
         info!("No documents require embedding.");
     }
