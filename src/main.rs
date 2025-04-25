@@ -251,9 +251,12 @@ async fn ensure_qdrant_collection(client: Arc<Qdrant>, collection_name: &str) ->
 
 // --- State Management ---
 
-/// Returns the expected path for the .gromastate file within the repository's .git directory.
+/// Returns the expected path for the .gromastate file within the repository's workdir.
 fn get_state_file_path(repo: &Repository) -> Result<PathBuf> {
-    Ok(repo.path().join(".gromastate")) // Store state inside .git folder
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Cannot get state file path: repository is bare"))?;
+    Ok(workdir.join(".gromastate")) // Store state file in the workdir root
 }
 
 /// Loads the GromaState from the .gromastate file.
