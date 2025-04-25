@@ -32,10 +32,11 @@ use qdrant_client::{
 use rig::{
     embeddings::{
         embed::{Embed, EmbedError, TextEmbedder},
-        embedding::{EmbeddingModel, OneOrMany}, // Added OneOrMany
+        embedding::EmbeddingModel, // Removed OneOrMany from here
         EmbeddingsBuilder,
     },
     providers::openai,
+    OneOrMany, // Import OneOrMany directly from rig
 };
 use serde::{Deserialize, Serialize}; // Already present, used for FileMetadata and now GromaState
 use serde_json; // Added for state serialization
@@ -492,7 +493,7 @@ async fn main() -> Result<()> {
 
 /// Processes embedding results and adds corresponding PointStructs to the output vector.
 fn process_embedding_results(
-    embedding_results: &Vec<(LongDocument, OneOrMany<rig::embeddings::embedding::Embedding>)>, // Accept OneOrMany
+    embedding_results: &Vec<(LongDocument, OneOrMany<rig::embeddings::embedding::Embedding>)>, // Use imported OneOrMany
     all_points_to_upsert: &mut Vec<PointStruct>, // Mutably borrow the points vector
 ) -> Result<()> {
     debug!("Constructing Qdrant points from embedding results...");
