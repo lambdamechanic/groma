@@ -20,7 +20,6 @@ use qdrant_client::{
         CreateCollectionBuilder, // Added MatchValue, Condition
         Distance,
         Filter,
-        PayloadIncludeSelector,
         PointId,
         PointStruct,
         SearchPointsBuilder, // Added Filter
