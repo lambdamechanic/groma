@@ -1,6 +1,6 @@
 # Groma
 
-![Groma Surveying Tool](https://github.com/lambdamechanic/groma/raw/main/assets/images/GromaNovotny.png)
+<img src="https://github.com/lambdamechanic/groma/raw/main/assets/images/GromaNovotny.png" alt="Groma Surveying Tool" width="300"/>
 
 Groma is a command-line tool that scans a folder within a Git repository, embeds the content of tracked files using OpenAI, stores these embeddings in a Qdrant vector database, and allows you to query for relevant files based on semantic similarity.
 
