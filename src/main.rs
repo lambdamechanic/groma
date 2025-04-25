@@ -124,29 +124,53 @@ struct LongDocument<'a> {
     current_hash: String,
     /// The full content of the file.
     content: String,
-    /// A reference to the text splitter for chunking.
-    text_splitter: &'a TextSplitter<CoreBPE>,
+    /// A reference to the tokenizer for chunking.
+    tokenizer: &'a CoreBPE,
 }
 
 impl<'a> Embed for LongDocument<'a> {
-    /// Chunks the document's content using the text splitter and provides
-    /// each non-empty chunk to the `TextEmbedder`.
+    /// Tokenizes the document's content, splits tokens into chunks, decodes chunks back to strings,
+    /// and provides each non-empty chunk to the `TextEmbedder`.
     fn embed(&self, embedder: &mut TextEmbedder) -> Result<(), EmbedError> {
-        // Use the text_splitter reference to chunk the content
-        let chunks = self
-            .text_splitter
-            .chunks(&self.content, TARGET_CHUNK_SIZE_TOKENS);
+        // Tokenize the entire content using the referenced tokenizer
+        let tokens = self.tokenizer.encode_ordinary(&self.content);
 
-        // Removed unused chunk_count variable
-        // Add each chunk's text to the embedder
-        for chunk in chunks {
-            if !chunk.trim().is_empty() {
-                embedder.embed(chunk.to_string()); // Pass ownership of the string chunk
-                                                   // Removed chunk_count increment
+        if tokens.is_empty() {
+            debug!("No tokens generated for file: {}", self.path_str);
+            return Ok(()); // Nothing to embed
+        }
+
+        // Split the tokens into chunks of the target size
+        for token_chunk in tokens.chunks(TARGET_CHUNK_SIZE_TOKENS) {
+            // Decode the token chunk back to a string.
+            // Using decode_bytes for potentially better handling of arbitrary bytes if needed,
+            // though decode should work fine with encode_ordinary.
+            match self.tokenizer.decode(token_chunk.to_vec()) {
+                Ok(text_chunk) => {
+                    let trimmed_chunk = text_chunk.trim();
+                    if !trimmed_chunk.is_empty() {
+                        // Pass ownership of the original decoded string (or trimmed if needed, but embedder likely handles)
+                        embedder.embed(text_chunk);
+                    } else {
+                        debug!(
+                            "Skipping empty decoded chunk for file: {}",
+                            self.path_str
+                        );
+                    }
+                }
+                Err(e) => {
+                    // Log the error and potentially skip this chunk or return an error.
+                    // Returning an error might halt the whole embedding process for all files.
+                    // Logging and skipping seems more robust for handling potentially rare decoding issues.
+                    warn!(
+                        "Failed to decode token chunk for file {}: {}. Skipping chunk.",
+                        self.path_str, e
+                    );
+                    // Optionally, convert to EmbedError:
+                    // return Err(EmbedError::Other(anyhow!("Failed to decode token chunk for {}: {}", self.path_str, e)));
+                }
             }
         }
-        // It's okay if a document yields no chunks (e.g., only whitespace).
-        // The calling code handles skipping empty files before creating LongDocument.
         Ok(())
     }
 }
@@ -213,12 +237,7 @@ fn generate_collection_name(folder_path: &Path) -> Result<String> {
     Ok(collection_name)
 }
 
-/// Creates a `TextSplitter` configured with the `cl100k_base` tokenizer (used by OpenAI).
-fn create_text_splitter() -> Result<TextSplitter<CoreBPE>> {
-    let tokenizer = cl100k_base().context("Failed to load cl100k_base tokenizer")?;
-    // Configure the splitter. Chunk size is passed to .chunks() later.
-    Ok(TextSplitter::new(tokenizer).with_trim_chunks(true))
-}
+// Removed create_text_splitter function
 
 /// Ensures that the specified Qdrant collection exists, creating it if necessary.
 async fn ensure_qdrant_collection(client: Arc<Qdrant>, collection_name: &str) -> Result<()> {
@@ -381,6 +400,11 @@ async fn main() -> Result<()> {
     initialize_logging(args.debug);
     info!("Starting Groma process...");
 
+    // Initialize Tokenizer early
+    info!("Stage: Initializing tokenizer...");
+    let tokenizer = cl100k_base().context("Failed to load cl100k_base tokenizer")?;
+    info!("Stage: Tokenizer initialized.");
+
     // 2. Canonicalize Folder Path (used for relative path calculation later)
     let canonical_folder_path = fs::canonicalize(&args.folder).with_context(|| {
         format!(
@@ -432,9 +456,10 @@ async fn main() -> Result<()> {
         info!("Stage: Starting file updates...");
         perform_file_updates(
             &args,
-            &repo, // Pass repository reference
+            &repo,               // Pass repository reference
             qdrant_client.clone(),
             embedding_model.clone(),
+            &tokenizer, // Pass tokenizer reference
             &collection_name,
             &canonical_folder_path, // Pass canonical folder path
         )
@@ -466,6 +491,7 @@ async fn perform_file_updates(
     repo: &Repository, // Use Git repository
     qdrant_client: Arc<Qdrant>,
     embedding_model: Arc<openai::EmbeddingModel>,
+    tokenizer: &CoreBPE, // Accept tokenizer reference
     collection_name: &str,
     canonical_folder_path: &Path, // Base path for filtering and relative paths
 ) -> Result<()> {
@@ -525,7 +551,7 @@ async fn perform_file_updates(
     );
     info!("Stage [Update]: Git diff calculated (or skipped for first run).");
 
-    let text_splitter = create_text_splitter().context("Failed to create text splitter")?;
+    // Removed text_splitter creation
     let mut documents_to_embed: Vec<LongDocument> = Vec::new();
     let mut paths_to_delete: Vec<String> = Vec::new();
     let mut processed_new_paths: std::collections::HashSet<PathBuf> =
@@ -549,7 +575,7 @@ async fn perform_file_updates(
                         processed_count += 1;
                         processed_new_paths.insert(canonical_path.clone()); // Track this path
 
-                        match process_file_for_embedding(&canonical_path, &text_splitter) {
+                        match process_file_for_embedding(&canonical_path, tokenizer) { // Pass tokenizer
                             Ok(Some(doc)) => documents_to_embed.push(doc),
                             Ok(None) => info!("Skipping empty or unreadable file: {}", path_str),
                             Err(e) => warn!("Failed processing file {}: {}", path_str, e),
@@ -621,7 +647,7 @@ async fn perform_file_updates(
                     }
 
                     // Process the new/modified file content for embedding
-                    match process_file_for_embedding(&canonical_new, &text_splitter) {
+                    match process_file_for_embedding(&canonical_new, tokenizer) { // Pass tokenizer
                         Ok(Some(doc)) => documents_to_embed.push(doc),
                         Ok(None) => info!("Skipping empty or unreadable file: {}", path_str), // Empty file case
                         Err(e) => warn!(
@@ -673,7 +699,7 @@ async fn perform_file_updates(
 
                     // Simple approach: Delete old, process new as ADDED
                     paths_to_delete.push(old_path_str_for_delete);
-                    match process_file_for_embedding(&canonical_new, &text_splitter) {
+                    match process_file_for_embedding(&canonical_new, tokenizer) { // Pass tokenizer
                         Ok(Some(doc)) => documents_to_embed.push(doc),
                         Ok(None) => info!(
                             "Skipping empty or unreadable renamed file: {}",
@@ -836,7 +862,7 @@ async fn perform_file_updates(
 /// Returns Ok(None) if the file is empty or cannot be read.
 fn process_file_for_embedding<'a>(
     file_path: &Path,
-    text_splitter: &'a TextSplitter<CoreBPE>, // Borrow splitter
+    tokenizer: &'a CoreBPE, // Accept tokenizer reference
 ) -> Result<Option<LongDocument<'a>>> {
     let path_str = file_path.to_string_lossy().to_string();
     let path_for_error = path_str.clone(); // Clone for error context
@@ -861,7 +887,7 @@ fn process_file_for_embedding<'a>(
                     path_str,
                     current_hash,
                     content,
-                    text_splitter, // Pass borrowed splitter
+                    tokenizer, // Pass borrowed tokenizer
                 }))
             }
         }
