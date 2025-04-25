@@ -421,6 +421,8 @@ async fn main() -> Result<()> {
     ).await?;
 
     Ok(())
+} // Close main function block here
+
 /// Handles the core logic for detecting file changes using Git, embedding changes, and upserting to Qdrant.
 async fn perform_file_updates(
     args: &Args,
