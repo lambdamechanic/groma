@@ -588,13 +588,13 @@ async fn perform_file_updates(
                     }
                 }
             }
-            // Ignore other statuses like CONFLICTED, IGNORED, UNTRACKED, etc.
-            _ => {
-             debug!("Ignoring Git status {:?} for old={:?}, new={:?}", status, old_repo_path, new_repo_path);
+            // Note: The if/else if chain handles NEW, MODIFIED, TYPECHANGE, DELETED, RENAMED.
+            // We implicitly ignore other statuses by not having an `else` block here.
+            // The debug log for ignored statuses was removed as it was part of the old `_` match arm.
         }
         // Note: We are ignoring other statuses like CONFLICTED, IGNORED, UNTRACKED, etc.
         // as they shouldn't appear in a tree-to-tree diff reflecting committed changes.
-    }
+    } // Closes the `for delta in diff.deltas()` loop
     info!("Finished processing {} Git diff deltas relevant to the target folder.", processed_count);
 
 
