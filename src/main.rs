@@ -8,7 +8,7 @@ use std::{
 };
 
 // External crate imports
-use anyhow::{anyhow, bail, Context, Result}; // Added bail
+use anyhow::{anyhow, Context, Result}; // Removed bail
 use clap::Parser;
 use git2::{DiffOptions, Oid, Repository, Status}; // Added DiffOptions, Oid, Status
 use hex; // Added for encoding hashes
@@ -460,8 +460,8 @@ async fn perform_file_updates(
     // Changes in the working directory or index that are not committed yet won't be processed.
     let current_tree = repo.head()?.peel_to_tree()?;
     let mut diff_opts = DiffOptions::new();
-    diff_opts.include_renames(true);
-    diff_opts.include_type_change(true);
+    // diff_opts.include_renames(true); // Rename detection is often default or handled differently
+    diff_opts.include_typechange(true); // Correct method name
     // Convert the target folder path to be relative to the workdir for pathspec
     let pathspec = args.folder.strip_prefix(workdir).unwrap_or(&args.folder);
     diff_opts.pathspec(pathspec); // Limit diff to the target folder relative to repo root
@@ -491,10 +491,13 @@ async fn perform_file_updates(
         // --- Crucial Filter: Ensure the *new* path (for Add/Modify/Rename) or *old* path (for Delete)
         // --- is actually within the *canonical target folder*. Git's pathspec is prefix-based
         // --- and might include files outside the exact target folder if names overlap.
-        let relevant_path_for_filter = match status {
-             Status::DELETED => old_absolute_path.as_ref(),
-             _ => new_absolute_path.as_ref(), // ADDED, MODIFIED, RENAMED, TYPECHANGE etc.
+        // Use constants for status checks (INDEX_* for tree-to-tree diff)
+        let relevant_path_for_filter = if status == Status::INDEX_DELETED {
+             old_absolute_path.as_ref()
+        } else {
+             new_absolute_path.as_ref() // INDEX_NEW, INDEX_MODIFIED, INDEX_RENAMED, INDEX_TYPECHANGE etc.
         };
+
 
         if relevant_path_for_filter.map_or(true, |p| !p.starts_with(canonical_folder_path)) {
              debug!(
@@ -507,21 +510,21 @@ async fn perform_file_updates(
 
         processed_count += 1; // Count files actually processed after filtering
 
-        match status {
-            Status::ADDED | Status::MODIFIED | Status::TYPECHANGE => {
-                if let Some(new_path_abs) = new_absolute_path {
-                    // Canonicalize AFTER confirming it starts with the canonical_folder_path prefix
-                    if let Ok(canonical_new) = fs::canonicalize(&new_path_abs) {
-                        let path_str = canonical_new.to_string_lossy().to_string();
-                        info!("Detected ADDED/MODIFIED/TYPECHANGE: {}", path_str);
-                        processed_new_paths.insert(canonical_new.clone()); // Track this path
+        // Use if/else if with status constants (bitflags)
+        if status == Status::INDEX_NEW || status == Status::INDEX_MODIFIED || status == Status::INDEX_TYPECHANGE {
+            if let Some(new_path_abs) = new_absolute_path {
+                // Canonicalize AFTER confirming it starts with the canonical_folder_path prefix
+                if let Ok(canonical_new) = fs::canonicalize(&new_path_abs) {
+                    let path_str = canonical_new.to_string_lossy().to_string();
+                    info!("Detected NEW/MODIFIED/TYPECHANGE: {}", path_str);
+                    processed_new_paths.insert(canonical_new.clone()); // Track this path
 
-                        // If modified/typechange, ensure old points are deleted (using canonical path)
-                        // This handles cases where filename case might change but path object differs
-                        if status == Status::MODIFIED || status == Status::TYPECHANGE {
-                             if let Some(old_path_abs) = old_absolute_path.as_ref() {
-                                // Attempt to canonicalize the old path for deletion consistency
-                                if let Ok(canonical_old) = fs::canonicalize(old_path_abs) {
+                    // If modified/typechange, ensure old points are deleted (using canonical path)
+                    // This handles cases where filename case might change but path object differs
+                    if status == Status::INDEX_MODIFIED || status == Status::INDEX_TYPECHANGE {
+                         if let Some(old_path_abs) = old_absolute_path.as_ref() {
+                            // Attempt to canonicalize the old path for deletion consistency
+                            if let Ok(canonical_old) = fs::canonicalize(old_path_abs) {
                                     paths_to_delete.push(canonical_old.to_string_lossy().to_string());
                                 } else {
                                      // If canonicalization fails (e.g., file already gone), use the absolute path string
@@ -535,17 +538,17 @@ async fn perform_file_updates(
                         match process_file_for_embedding(&canonical_new, &text_splitter) {
                             Ok(Some(doc)) => documents_to_embed.push(doc),
                             Ok(None) => info!("Skipping empty or unreadable file: {}", path_str), // Empty file case
-                            Err(e) => warn!("Failed processing ADDED/MODIFIED/TYPECHANGE file {}: {}", path_str, e),
+                            Err(e) => warn!("Failed processing NEW/MODIFIED/TYPECHANGE file {}: {}", path_str, e),
                         }
                     } else {
-                        warn!("Could not canonicalize new path for ADDED/MODIFIED/TYPECHANGE file: {}", new_path_abs.display());
+                        warn!("Could not canonicalize new path for NEW/MODIFIED/TYPECHANGE file: {}", new_path_abs.display());
                     }
                 }
             }
-            Status::DELETED => {
-                if let Some(old_path_abs) = old_absolute_path {
-                     // Attempt to canonicalize the path for deletion consistency
-                     if let Ok(canonical_old) = fs::canonicalize(&old_path_abs) {
+        } else if status == Status::INDEX_DELETED {
+            if let Some(old_path_abs) = old_absolute_path {
+                 // Attempt to canonicalize the path for deletion consistency
+                 if let Ok(canonical_old) = fs::canonicalize(&old_path_abs) {
                         let path_str = canonical_old.to_string_lossy().to_string();
                         info!("Detected DELETED: {}", path_str);
                         paths_to_delete.push(path_str);
@@ -553,13 +556,12 @@ async fn perform_file_updates(
                          // If canonicalization fails (file is already gone), use the absolute path string
                          warn!("Could not canonicalize path for DELETED file: {}. Using non-canonical path for deletion.", old_path_abs.display());
                          paths_to_delete.push(old_path_abs.to_string_lossy().to_string());
-                     }
-                }
+                 }
             }
-            Status::RENAMED => {
-                if let (Some(old_path_abs), Some(new_path_abs)) = (old_absolute_path, new_absolute_path) {
-                    // Canonicalize AFTER confirming the new path starts with the canonical_folder_path prefix
-                    if let Ok(canonical_new) = fs::canonicalize(&new_path_abs) {
+        } else if status == Status::INDEX_RENAMED {
+            if let (Some(old_path_abs), Some(new_path_abs)) = (old_absolute_path, new_absolute_path) {
+                // Canonicalize AFTER confirming the new path starts with the canonical_folder_path prefix
+                if let Ok(canonical_new) = fs::canonicalize(&new_path_abs) {
                         let new_path_str = canonical_new.to_string_lossy().to_string();
                         processed_new_paths.insert(canonical_new.clone()); // Track this path
 
@@ -588,9 +590,10 @@ async fn perform_file_updates(
             }
             // Ignore other statuses like CONFLICTED, IGNORED, UNTRACKED, etc.
             _ => {
-                 debug!("Ignoring Git status {:?} for old={:?}, new={:?}", status, old_repo_path, new_repo_path);
-            }
+             debug!("Ignoring Git status {:?} for old={:?}, new={:?}", status, old_repo_path, new_repo_path);
         }
+        // Note: We are ignoring other statuses like CONFLICTED, IGNORED, UNTRACKED, etc.
+        // as they shouldn't appear in a tree-to-tree diff reflecting committed changes.
     }
     info!("Finished processing {} Git diff deltas relevant to the target folder.", processed_count);
 
