@@ -1,6 +1,6 @@
 # Groma
 
-<table>
+<table border="0" cellspacing="0">
 <tr>
 <td valign="top">
 Groma is a command-line tool that scans a folder within a Git repository, embeds the content of tracked files using OpenAI, stores these embeddings in a Qdrant vector database, and allows you to query for relevant files based on semantic similarity.
