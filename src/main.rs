@@ -558,10 +558,10 @@ async fn perform_file_updates(
     let mut processed_count = 0;
 
     // --- Phase 2: Process Diff Deltas ---
-    for delta in diff.deltas() {
-        let status = delta.status();
-        let old_repo_path = delta.old_file().path(); // Path relative to repo root
-        let new_repo_path = delta.new_file().path(); // Path relative to repo root
+    for diff_delta in diff.deltas() {
+        let delta = diff_delta.status();
+        let old_repo_path = diff_delta.old_file().path(); // Path relative to repo root
+        let new_repo_path = diff_delta.new_file().path(); // Path relative to repo root
 
         // Construct absolute paths based on workdir
         let old_absolute_path = old_repo_path.map(|p| workdir.join(p));
@@ -571,7 +571,7 @@ async fn perform_file_updates(
         // --- is actually within the *canonical target folder*. Git's pathspec is prefix-based
         // --- and might include files outside the exact target folder if names overlap.
         // Use Delta enum variants for status checks
-        let relevant_path_for_filter = if status == Delta::Deleted {
+        let relevant_path_for_filter = if delta == Delta::Deleted {
             old_absolute_path.as_ref()
         } else {
             new_absolute_path.as_ref() // Added, Modified, Renamed, Typechange etc.
@@ -579,8 +579,8 @@ async fn perform_file_updates(
 
         if relevant_path_for_filter.map_or(true, |p| !p.starts_with(canonical_folder_path)) {
             debug!(
-                 "Skipping delta outside target folder (canonical check): old={:?}, new={:?}, status={:?}",
-                 old_repo_path, new_repo_path, status
+                 "Skipping delta outside target folder (canonical check): old={:?}, new={:?}, delta={:?}",
+                 old_repo_path, new_repo_path, delta
              );
             continue;
         }
@@ -589,7 +589,7 @@ async fn perform_file_updates(
         processed_count += 1; // Count files actually processed after filtering
 
         // Use if/else if with Delta enum variants
-        if status == Delta::Added || status == Delta::Modified || status == Delta::Typechange {
+        if delta == Delta::Added || delta == Delta::Modified || delta == Delta::Typechange {
             if let Some(new_path_abs) = new_absolute_path {
                 // Canonicalize AFTER confirming it starts with the canonical_folder_path prefix
                 if let Ok(canonical_new) = fs::canonicalize(&new_path_abs) {
@@ -599,7 +599,7 @@ async fn perform_file_updates(
 
                     // If modified/typechange, ensure old points are deleted (using canonical path)
                     // This handles cases where filename case might change but path object differs
-                    if status == Delta::Modified || status == Delta::Typechange {
+                    if delta == Delta::Modified || delta == Delta::Typechange {
                         if let Some(old_path_abs) = old_absolute_path.as_ref() {
                             // Attempt to canonicalize the old path for deletion consistency
                             if let Ok(canonical_old) = fs::canonicalize(old_path_abs) {
@@ -628,7 +628,7 @@ async fn perform_file_updates(
                     );
                 }
             }
-        } else if status == Delta::Deleted {
+        } else if delta == Delta::Deleted {
             if let Some(old_path_abs) = old_absolute_path {
                 // Attempt to canonicalize the path for deletion consistency
                 if let Ok(canonical_old) = fs::canonicalize(&old_path_abs) {
@@ -641,7 +641,7 @@ async fn perform_file_updates(
                     paths_to_delete.push(old_path_abs.to_string_lossy().to_string());
                 }
             }
-        } else if status == Delta::Renamed {
+        } else if delta == Delta::Renamed {
             if let (Some(old_path_abs), Some(new_path_abs)) = (old_absolute_path, new_absolute_path)
             {
                 // Canonicalize AFTER confirming the new path starts with the canonical_folder_path prefix
