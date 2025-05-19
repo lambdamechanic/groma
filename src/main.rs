@@ -59,9 +59,9 @@ const QDRANT_UPSERT_BATCH_SIZE: usize = 100;
 /// Aiming for the maximum supported by models like text-embedding-3-small (8192).
 const TARGET_CHUNK_SIZE_TOKENS: usize = 8192;
 /// Maximum number of tokens to include in a single request to the embedding API.
-/// This helps avoid hitting rate limits (e.g., OpenAI's 1,000,000 TPM for text-embedding-3-small).
-/// Set significantly lower than the TPM limit to allow multiple requests per minute.
-const MAX_TOKENS_PER_EMBEDDING_REQUEST: usize = 500_000;
+/// OpenAI has a limit of 300,000 tokens per request for embeddings.
+/// Setting this to 200,000 to provide a larger safety margin.
+const MAX_TOKENS_PER_EMBEDDING_REQUEST: usize = 200_000;
 
 // --- Command Line Arguments ---
 
@@ -177,6 +177,19 @@ impl<'a> Embed for LongDocument<'a> {
             }
         }
         Ok(())
+    }
+}
+
+// Implement additional methods for LongDocument outside the Embed trait
+impl<'a> LongDocument<'a> {
+    // Add a method to estimate the number of embedding API calls this document will require
+    fn estimated_embedding_calls(&self) -> usize {
+        let tokens = self.tokenizer.encode_ordinary(&self.content);
+        if tokens.is_empty() {
+            return 0;
+        }
+        // Calculate how many chunks this document will be split into
+        (tokens.len() + TARGET_CHUNK_SIZE_TOKENS - 1) / TARGET_CHUNK_SIZE_TOKENS
     }
 }
 
@@ -834,11 +847,20 @@ async fn perform_file_updates(
 
         let mut current_batch_docs: Vec<DocForBatch> = Vec::new();
         let mut current_batch_tokens: usize = 0;
+        let mut current_batch_chunks: usize = 0;
+        
+        // Calculate the maximum number of chunks we can safely include in a batch
+        // Each chunk is TARGET_CHUNK_SIZE_TOKENS tokens, and we need to stay under MAX_TOKENS_PER_EMBEDDING_REQUEST
+        let max_chunks_per_batch = MAX_TOKENS_PER_EMBEDDING_REQUEST / TARGET_CHUNK_SIZE_TOKENS;
+        info!("Maximum chunks per embedding batch: {}", max_chunks_per_batch);
 
         for doc in documents_to_embed { // Consumes the vector
             let tokens = tokenizer.encode_ordinary(&doc.content);
             let doc_token_count = tokens.len();
-
+            
+            // Estimate how many chunks this document will generate
+            let doc_chunks = doc.estimated_embedding_calls();
+            
             // Skip documents that are themselves too large for a single request
             if doc_token_count > MAX_TOKENS_PER_EMBEDDING_REQUEST {
                 warn!("Skipping document {} because its token count ({}) exceeds the per-request limit ({})",
@@ -846,11 +868,13 @@ async fn perform_file_updates(
                 continue;
             }
 
-            // If adding the current document would exceed the token limit, process the existing batch first.
-            if !current_batch_docs.is_empty() && current_batch_tokens + doc_token_count > MAX_TOKENS_PER_EMBEDDING_REQUEST {
+            // If adding the current document would exceed the chunk limit, process the existing batch first
+            if !current_batch_docs.is_empty() && 
+               (current_batch_chunks + doc_chunks > max_chunks_per_batch || 
+                current_batch_tokens + doc_token_count > MAX_TOKENS_PER_EMBEDDING_REQUEST) {
                 info!(
-                    "Processing embedding batch. Token count: {}, Document count: {}",
-                    current_batch_tokens, current_batch_docs.len()
+                    "Processing embedding batch. Token count: {}, Chunk count: {}, Document count: {}",
+                    current_batch_tokens, current_batch_chunks, current_batch_docs.len()
                 );
 
                 // Convert DocForBatch back to LongDocument for EmbeddingsBuilder
@@ -884,10 +908,12 @@ async fn perform_file_updates(
                 // Clear the batch for the next set of documents
                 current_batch_docs.clear();
                 current_batch_tokens = 0;
+                current_batch_chunks = 0;
             }
 
-            // Add the current document to the batch
+            // Now add the current document to the new or existing batch
             current_batch_tokens += doc_token_count;
+            current_batch_chunks += doc_chunks;
             current_batch_docs.push(DocForBatch {
                 path_str: doc.path_str, // Move strings
                 current_hash: doc.current_hash, // Move strings
@@ -898,9 +924,10 @@ async fn perform_file_updates(
         // --- Process the final batch if any documents remain ---
         if !current_batch_docs.is_empty() {
             info!(
-                "Processing final embedding batch. Token count: {}, Document count: {}",
-                current_batch_tokens, current_batch_docs.len()
+                "Processing final embedding batch. Token count: {}, Chunk count: {}, Document count: {}",
+                current_batch_tokens, current_batch_chunks, current_batch_docs.len()
             );
+            
             let final_batch_long_docs: Vec<LongDocument> = current_batch_docs.iter().map(|d| LongDocument {
                 path_str: d.path_str.clone(),
                 current_hash: d.current_hash.clone(),
