@@ -444,7 +444,9 @@ async fn main() -> Result<()> {
                 initialize_logging(debug_enabled);
                 info!("Running in MCP server mode");
                 return mcp_server::run_mcp_server().await;
-            }
+            },
+            #[cfg(not(feature = "mcp"))]
+            _ => return Err(anyhow!("MCP feature is not enabled; rebuild with --features \"mcp\"")),
         }
     } else if let Some(folder) = &args.folder {
         // Initialize logging for CLI mode
