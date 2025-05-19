@@ -52,8 +52,9 @@ impl Router for GromaRouter {
     }
 
     fn instructions(&self) -> String {
-        "Use this for finding semantically simular files in a given repository. \
-        The results will be returned as a JSON object with relevant files.".to_string()
+        "Use this for finding semantically similar files in a given repository. \
+        The results will be returned as a JSON object with relevant files listed.
+        It is highly recommended to use this along with rg for searching".to_string()
     }
 
     fn capabilities(&self) -> ServerCapabilities {
@@ -68,17 +69,17 @@ impl Router for GromaRouter {
         vec![
             Tool::new(
                 "query".to_string(),
-                "pass in terms to find related files for, important use this as well as other search for searching for relevant files in a codebase".to_string(),
+                "pass in search terms to find related files that are similar in concept".to_string(),
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "The natural language query to search for"
+                            "description": "what to search for, terms, concepts, snippets etc"
                         },
                         "folder": {
                             "type": "string",
-                            "description": "The folder path to search within"
+                            "description": "The path to the repository to search"
                         },
                         "cutoff": {
                             "type": "number",
