@@ -45,4 +45,4 @@ mcp-core = { git = "https://github.com/block/goose", branch = "main", package = 
 mcp-server = { git = "https://github.com/block/goose", branch = "main", package = "mcp-server", optional = true }
 tower-service = { version = "0.3", optional = true } # Required for Service trait
 pin-project = "1.1" # Required for pin-project macro
-async-trait = "0.1" # Required for async traits
+async-trait = { version = "0.1", optional = true } # Required for async traits
