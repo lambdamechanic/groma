@@ -7,6 +7,8 @@ edition = "2021"
 debug = true # Enable debug symbols in release builds
 
 [dependencies]
+# Use rig-core from GitHub
+rig-core = { git = "https://github.com/lambdamechanic/rig" }
 
 [features]
 mcp = [
@@ -15,8 +17,6 @@ mcp = [
     "tower-service",
     "async-trait",
 ]
-# Use rig-core from GitHub
-rig-core = { git = "https://github.com/lambdamechanic/rig" }
 # rig-openrouter = "0.11" # Removed - OpenRouter is part of rig crate features
 once_cell = "1.18.0"
 rig-qdrant = "0.1.12"    # Update to latest patch compatible with rig 0.11
