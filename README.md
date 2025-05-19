@@ -95,6 +95,8 @@ You can run groma as an mcp server for agents like Claude Code, Goose, VS Code a
 
 Run `groma mcp` as the command from the agent and it will run from stdin as per the MCP protocol
 
+Make sure you turn on the `mcp` feature first (ie, `cargo build --features mcp`)
+
 ## Helper Scripts
 
 The `scripts/` directory contains `jq` scripts to process Groma's JSON output for different purposes.
