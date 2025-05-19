@@ -10,6 +10,7 @@ debug = true # Enable debug symbols in release builds
 # Use rig-core from GitHub, specifying subfolder in https://github.com/lambdamechanic/rig
 rig-core = { git = "https://github.com/lambdamechanic/rig", subdir = "rig-core" }
 # rig-openrouter = "0.11" # Removed - OpenRouter is part of rig crate features
+once_cell = "1.18.0"
 rig-qdrant = "0.1.12"    # Update to latest patch compatible with rig 0.11
 qdrant-client = "1.14.0" # Update to the version used in rig-qdrant examples
 clap = { version = "4.4", features = ["derive", "env"] } # Add 'env' feature

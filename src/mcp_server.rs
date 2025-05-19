@@ -13,9 +13,16 @@ use mcp_server::{
 use serde_json::Value;
 use std::{
     future::Future,
-    pin::Pin, 
+    pin::Pin,
+    sync::Mutex,
+    collections::HashSet,
 };
 use tokio::io::{stdin, stdout};
+use tracing::{info, error};
+use once_cell::sync::Lazy;
+
+// Simple set to track which folders are currently being indexed
+static INDEXING_FOLDERS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 /// A router that wraps our existing Groma functionality to expose it via MCP
 #[derive(Clone)]
@@ -30,31 +37,180 @@ impl GromaRouter {
     async fn process_query(&self, query: String, folder: String, cutoff: f32) -> Result<String, ToolError> {
         use std::path::PathBuf;
         
+        // Check if this folder is already being indexed
+        let is_indexing = {
+            let indexing_folders = INDEXING_FOLDERS.lock().unwrap();
+            indexing_folders.contains(&folder)
+        };
+        
+        // If we're already indexing, return a message
+        if is_indexing {
+            let json_output = serde_json::json!({
+                "status": "indexing",
+                "message": format!("The codebase '{}' is currently being indexed. Please check back in a few minutes.", folder),
+                "files_by_relevance": []
+            });
+            
+            return serde_json::to_string_pretty(&json_output)
+                .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize message: {}", e)));
+        }
+        
         // Get config from environment
         let config = crate::GromaConfig::from_env()
             .map_err(|e| ToolError::ExecutionError(format!("Failed to get configuration: {}", e)))?;
         
         // Prepare for query
         let folder_path = PathBuf::from(&folder);
-        let (embedding_model, qdrant_client, collection_name, canonical_folder_path) = 
-            crate::prepare_for_query(&folder_path, cutoff, &config).await
-            .map_err(|e| ToolError::ExecutionError(format!("Failed to prepare for query: {}", e)))?;
+        let prepare_result = crate::prepare_for_query(&folder_path, cutoff, &config).await;
         
-        // Use the core query processing function from main.rs
-        let json_output = crate::process_query_core(
+        let (embedding_model, qdrant_client, collection_name, canonical_folder_path) = match prepare_result {
+            Ok(result) => result,
+            Err(e) => {
+                // Return a friendly message if we can't prepare for the query
+                let error_str = e.to_string();
+                let message = if error_str.contains("canonicalize") {
+                    format!("The folder '{}' does not exist or is not accessible.", folder)
+                } else {
+                    format!("Failed to prepare for query: {}", e)
+                };
+                
+                let json_output = serde_json::json!({
+                    "status": "error",
+                    "message": message,
+                    "files_by_relevance": []
+                });
+                
+                return serde_json::to_string_pretty(&json_output)
+                    .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize message: {}", e)));
+            }
+        };
+        
+        // Check if the collection exists
+        let collections = match qdrant_client.list_collections().await {
+            Ok(collections) => collections,
+            Err(e) => {
+                // Return a friendly message if we can't list collections
+                let json_output = serde_json::json!({
+                    "status": "error",
+                    "message": format!("Failed to connect to Qdrant: {}. Please check your Qdrant configuration.", e),
+                    "files_by_relevance": []
+                });
+                
+                return serde_json::to_string_pretty(&json_output)
+                    .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize message: {}", e)));
+            }
+        };
+        
+        let collection_exists = collections.collections.iter().any(|c| c.name == collection_name);
+        
+        // If collection doesn't exist, start indexing
+        if !collection_exists {
+            // Start indexing in the background
+            start_background_indexing(&folder).await;
+            
+            // Return a message that indexing has started
+            let json_output = serde_json::json!({
+                "status": "indexing_started",
+                "message": format!("Started indexing codebase '{}'. Please check back in a few minutes.", folder),
+                "files_by_relevance": []
+            });
+            
+            return serde_json::to_string_pretty(&json_output)
+                .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize message: {}", e)));
+        }
+        
+        // Try to run the query
+        match crate::process_query_core(
             &query,
             qdrant_client,
             embedding_model,
             &collection_name,
             &canonical_folder_path,
             cutoff
-        ).await
-        .map_err(|e| ToolError::ExecutionError(format!("Query processing failed: {}", e)))?;
-        
-        // Return the JSON as a string
-        serde_json::to_string_pretty(&json_output)
-            .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize results: {}", e)))
+        ).await {
+            Ok(json_output) => {
+                // Return the JSON as a string
+                serde_json::to_string_pretty(&json_output)
+                    .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize results: {}", e)))
+            },
+            Err(e) => {
+                // If the error indicates the collection doesn't exist, start indexing
+                let error_str = e.to_string();
+                if error_str.contains("Collection not found") || 
+                   error_str.contains("does not exist") || 
+                   error_str.contains("Failed to search Qdrant") {
+                    
+                    // Start indexing in the background
+                    start_background_indexing(&folder).await;
+                    
+                    let json_output = serde_json::json!({
+                        "status": "indexing_started",
+                        "message": format!("Started indexing codebase '{}'. Please check back in a few minutes.", folder),
+                        "files_by_relevance": []
+                    });
+                    
+                    serde_json::to_string_pretty(&json_output)
+                        .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize message: {}", e)))
+                } else {
+                    // For other errors, return a friendly error message
+                    let json_output = serde_json::json!({
+                        "status": "error",
+                        "message": format!("Query processing failed: {}. Please try again later.", e),
+                        "files_by_relevance": []
+                    });
+                    
+                    serde_json::to_string_pretty(&json_output)
+                        .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize error message: {}", e)))
+                }
+            }
+        }
     }
+}
+
+/// Helper function to start indexing a folder in the background
+async fn start_background_indexing(folder: &str) {
+    use std::path::PathBuf;
+    use tokio::task;
+    use tokio::process::Command;
+    
+    info!("Starting indexing for {}...", folder);
+    
+    // Mark this folder as being indexed
+    {
+        let mut indexing_folders = INDEXING_FOLDERS.lock().unwrap();
+        indexing_folders.insert(folder.to_string());
+    }
+    
+    // Clone what we need for the background task
+    let folder_clone = folder.to_string();
+    
+    // Get the current executable path
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("groma"));
+    
+    // Spawn a background process to run the indexing
+    task::spawn(async move {
+        info!("Running indexing process for {}", folder_clone);
+        
+        // Run the CLI as a separate process
+        let status = Command::new(current_exe)
+            .arg(&folder_clone)
+            .status()
+            .await;
+        
+        if let Err(e) = &status {
+            error!("Failed to start indexing for {}: {}", folder_clone, e);
+        } else if let Ok(exit_status) = status {
+            if exit_status.success() {
+                info!("Indexing completed successfully for {}", folder_clone);
+            } else {
+                error!("Indexing failed for {}: {:?}", folder_clone, exit_status);
+            }
+        }
+        
+        // Remove from indexing folders
+        let mut indexing_folders = INDEXING_FOLDERS.lock().unwrap();
+        indexing_folders.remove(&folder_clone);
+    });
 }
 
 impl Router for GromaRouter {
