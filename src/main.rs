@@ -110,7 +110,8 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Run as an MCP server using stdio for communication
+    #[cfg_attr(feature = "mcp", command(about = "Run as an MCP server using stdio for communication"))]
+    #[cfg_attr(not(feature = "mcp"), command(about = "Run as an MCP server (disabled; rebuild with --features \"mcp\")"))]
     Mcp {
         /// Enable debug logging. By default, only errors are logged unless RUST_LOG is set.
         #[arg(long)]
