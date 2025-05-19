@@ -18,6 +18,8 @@ mcp = [
     "async-trait",
 ]
 # rig-openrouter = "0.11" # Removed - OpenRouter is part of rig crate features
+
+[dependencies]
 once_cell = "1.18.0"
 rig-qdrant = "0.1.12"    # Update to latest patch compatible with rig 0.11
 qdrant-client = "1.14.0" # Update to the version used in rig-qdrant examples
