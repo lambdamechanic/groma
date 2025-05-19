@@ -43,6 +43,6 @@ tiktoken-rs = "0.5" # Required by text_splitter feature
 # MCP Server dependencies
 mcp-core = { git = "https://github.com/block/goose", branch = "main", package = "mcp-core", optional = true }
 mcp-server = { git = "https://github.com/block/goose", branch = "main", package = "mcp-server", optional = true }
-tower-service = "0.3" # Required for Service trait
+tower-service = { version = "0.3", optional = true } # Required for Service trait
 pin-project = "1.1" # Required for pin-project macro
 async-trait = "0.1" # Required for async traits
