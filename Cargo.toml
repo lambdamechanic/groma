@@ -7,8 +7,8 @@ edition = "2021"
 debug = true # Enable debug symbols in release builds
 
 [dependencies]
-# Use the main rig crate (package name rig-core) with necessary features
-rig-core = { path = "../rig/rig-core" } # Use local patched version
+# Use rig-core from GitHub, specifying subfolder in https://github.com/lambdamechanic/rig
+rig-core = { git = "https://github.com/lambdamechanic/rig", subdir = "rig-core" }
 # rig-openrouter = "0.11" # Removed - OpenRouter is part of rig crate features
 rig-qdrant = "0.1.12"    # Update to latest patch compatible with rig 0.11
 qdrant-client = "1.14.0" # Update to the version used in rig-qdrant examples
