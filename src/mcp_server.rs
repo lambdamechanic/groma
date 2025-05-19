@@ -28,21 +28,32 @@ impl GromaRouter {
 
     /// Process a query and return the results
     async fn process_query(&self, query: String, folder: String, cutoff: f32) -> Result<String, ToolError> {
-        // For now, we'll just simulate the output since integrating with the actual
-        // process_query function would require significant changes to handle stdout redirection
-        let json_output = serde_json::json!({
-            "query": query,
-            "folder": folder,
-            "cutoff": cutoff,
-            "files_by_relevance": [
-                [0.95, "src/main.rs"],
-                [0.85, "src/mcp_server.rs"],
-                [0.75, "README.md"]
-            ]
-        });
-
+        use std::path::PathBuf;
+        
+        // Get config from environment
+        let config = crate::GromaConfig::from_env()
+            .map_err(|e| ToolError::ExecutionError(format!("Failed to get configuration: {}", e)))?;
+        
+        // Prepare for query
+        let folder_path = PathBuf::from(&folder);
+        let (embedding_model, qdrant_client, collection_name, canonical_folder_path) = 
+            crate::prepare_for_query(&folder_path, cutoff, &config).await
+            .map_err(|e| ToolError::ExecutionError(format!("Failed to prepare for query: {}", e)))?;
+        
+        // Use the core query processing function from main.rs
+        let json_output = crate::process_query_core(
+            &query,
+            qdrant_client,
+            embedding_model,
+            &collection_name,
+            &canonical_folder_path,
+            cutoff
+        ).await
+        .map_err(|e| ToolError::ExecutionError(format!("Query processing failed: {}", e)))?;
+        
+        // Return the JSON as a string
         serde_json::to_string_pretty(&json_output)
-            .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize query results: {}", e)))
+            .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize results: {}", e)))
     }
 }
 
@@ -84,7 +95,7 @@ impl Router for GromaRouter {
                         "cutoff": {
                             "type": "number",
                             "description": "Relevance cutoff (0.0-1.0)",
-                            "default": 0.7
+                            "default": 0.3
                         }
                     },
                     "required": ["query", "folder"]
@@ -128,7 +139,7 @@ impl Router for GromaRouter {
                     let cutoff = arguments
                         .get("cutoff")
                         .and_then(|v| v.as_f64())
-                        .unwrap_or(0.7) as f32;
+                        .unwrap_or(0.3) as f32;
                     
                     // Process the query and return results directly
                     let result = this.process_query(query, folder, cutoff).await?;

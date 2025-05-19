@@ -469,15 +469,18 @@ async fn main() -> Result<()> {
 
         // 3. Initialize Clients (OpenAI, Qdrant)
         info!("Stage: Initializing clients...");
-        let openai_client = rig::providers::openai::Client::new(&args.openai_key);
-        let embedding_model: Arc<openai::EmbeddingModel> =
-            Arc::new(openai_client.embedding_model(&args.openai_model));
+        let config = GromaConfig {
+            openai_key: args.openai_key.clone(),
+            openai_model: args.openai_model.clone(),
+            qdrant_url: args.qdrant_url.to_string(),
+        };
+        
+        let (embedding_model, qdrant_client) = config.initialize_clients()?;
         info!(
             "Using OpenAI Embedding model: {} (Dimension: {})",
-            args.openai_model, EMBEDDING_DIMENSION
+            config.openai_model, EMBEDDING_DIMENSION
         );
-        let qdrant_client = Arc::new(Qdrant::from_url(&args.qdrant_url.to_string()).build()?);
-        info!("Connected to Qdrant at {}", args.qdrant_url);
+        info!("Connected to Qdrant at {}", config.qdrant_url);
         info!("Stage: Clients initialized.");
 
         // 4. Determine Collection Name & Ensure It Exists
@@ -1080,6 +1083,160 @@ fn process_file_for_embedding<'a>(
     }
 }
 
+/// Configuration structure that can be used by both CLI and MCP server
+#[derive(Clone)]
+pub struct GromaConfig {
+    pub openai_key: String,
+    pub openai_model: String,
+    pub qdrant_url: String,
+}
+
+impl GromaConfig {
+    /// Create a new configuration from environment variables or defaults
+    pub fn from_env() -> Result<Self> {
+        let openai_key = std::env::var("OPENAI_API_KEY")
+            .context("OPENAI_API_KEY environment variable not set")?;
+        
+        let openai_model = std::env::var("OPENAI_MODEL")
+            .unwrap_or_else(|_| "text-embedding-3-small".to_string());
+        
+        let qdrant_url = std::env::var("QDRANT_URL")
+            .unwrap_or_else(|_| "http://localhost:6334".to_string());
+        
+        Ok(Self {
+            openai_key,
+            openai_model,
+            qdrant_url,
+        })
+    }
+    
+    /// Initialize clients using this configuration
+    pub fn initialize_clients(&self) -> Result<(Arc<openai::EmbeddingModel>, Arc<Qdrant>)> {
+        // Create OpenAI client
+        let openai_client = rig::providers::openai::Client::new(&self.openai_key);
+        let embedding_model = Arc::new(openai_client.embedding_model(&self.openai_model));
+        
+        // Create Qdrant client
+        let qdrant_client = Arc::new(Qdrant::from_url(&self.qdrant_url).build()
+            .context(format!("Failed to connect to Qdrant at {}", self.qdrant_url))?);
+        
+        Ok((embedding_model, qdrant_client))
+    }
+}
+
+/// Helper function to prepare everything needed for a query
+pub async fn prepare_for_query(
+    folder_path: &Path,
+    _cutoff: f32, // Unused for now, but kept for future use
+    config: &GromaConfig,
+) -> Result<(Arc<openai::EmbeddingModel>, Arc<Qdrant>, String, PathBuf)> {
+    // Get canonical folder path
+    let canonical_folder_path = fs::canonicalize(folder_path)
+        .with_context(|| format!("Failed to canonicalize folder path: {}", folder_path.display()))?;
+    
+    // Initialize clients
+    let (embedding_model, qdrant_client) = config.initialize_clients()?;
+    
+    // Get collection name
+    let collection_name = generate_collection_name(folder_path)?;
+    
+    Ok((embedding_model, qdrant_client, collection_name, canonical_folder_path))
+}
+
+/// Core query processing function that can be reused by both CLI and MCP server
+/// Returns a JSON-serializable structure with search results
+pub async fn process_query_core(
+    query: &str,
+    qdrant_client: Arc<Qdrant>,
+    embedding_model: Arc<openai::EmbeddingModel>,
+    collection_name: &str,
+    canonical_folder_path: &Path,
+    cutoff: f32,
+) -> Result<serde_json::Value> {
+    // --- Phase 1: Embed Query ---
+    info!("Processing query: '{}'", query);
+    info!("Stage [Query Core]: Embedding query...");
+    let query_embedding = embedding_model
+        .embed_text(query)
+        .await
+        .context("Failed to embed query")?;
+    info!("Stage [Query Core]: Query embedded.");
+
+    // --- Phase 2: Search Qdrant ---
+    info!("Stage [Query Core]: Searching Qdrant...");
+    info!("Searching for relevant files...");
+    let query_vector_f32: Vec<f32> = query_embedding.vec.into_iter().map(|v| v as f32).collect();
+
+    let search_result = qdrant_client
+        .search_points(
+            SearchPointsBuilder::new(collection_name, query_vector_f32, 100) // Limit results
+                .with_payload(true) // Request payload to get file path
+                .score_threshold(cutoff), // Apply relevance cutoff
+        )
+        .await
+        .context("Failed to search Qdrant")?;
+    info!(
+        "Found {} potential matching chunks.",
+        search_result.result.len()
+    );
+    info!("Stage [Query Core]: Qdrant search complete.");
+
+    // --- Phase 3: Aggregate Results by File Path ---
+    info!("Stage [Query Core]: Aggregating results by file path...");
+    // Group results by file path, keeping the highest score for each file.
+    let mut file_scores: HashMap<String, f32> = HashMap::new();
+    for hit in search_result.result {
+        if let Some(path_val) = hit.payload.get("path") {
+            if let Some(absolute_path_str) = path_val.as_str() {
+                let score = hit.score;
+                file_scores
+                    .entry(absolute_path_str.to_string())
+                    .and_modify(|e| *e = e.max(score)) // Update score if higher
+                    .or_insert(score); // Insert if new
+            } else {
+                warn!(
+                    "Found hit with non-string 'path' payload: {:?}",
+                    hit.payload
+                );
+            }
+        } else {
+            warn!("Found hit without 'path' payload: {:?}", hit.payload);
+        }
+    }
+    info!("Stage [Query Core]: Results aggregated.");
+
+    // --- Phase 4: Format Aggregated Results ---
+    info!("Stage [Query Core]: Formatting results...");
+    // Convert absolute paths to relative paths and sort by score.
+    let mut aggregated_results: Vec<(f32, String)> = file_scores
+        .into_iter()
+        .filter_map(|(absolute_path_str, score)| {
+            let absolute_path = PathBuf::from(&absolute_path_str);
+            match absolute_path.strip_prefix(canonical_folder_path) {
+                Ok(relative_path) => Some((score, relative_path.to_string_lossy().to_string())),
+                Err(e) => {
+                    warn!(
+                        "Failed to make path relative: Cannot strip prefix '{}' from path '{}': {}. Skipping result.",
+                        canonical_folder_path.display(), absolute_path_str, e
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
+
+    // Sort by score descending
+    aggregated_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Prepare JSON output structure: {"files_by_relevance": [[score, path], ...]}
+    let json_output = serde_json::json!({
+        "files_by_relevance": aggregated_results
+    });
+    
+    info!("Stage [Query Core]: Results formatted.");
+    Ok(json_output)
+}
+
 /// Handles reading the user query, embedding it, searching Qdrant, and printing results.
 async fn process_query(
     args: &Args,
@@ -1105,84 +1262,19 @@ async fn process_query(
     info!("Processing query: '{}'", query);
     info!("Stage [Query]: Query read.");
 
-    // --- Phase 6: Embed Query ---
-    info!("Stage [Query]: Embedding query...");
-    let query_embedding = embedding_model
-        .embed_text(query)
-        .await
-        .context("Failed to embed query")?;
-    info!("Stage [Query]: Query embedded.");
+    // Call the core query processing function
+    let json_output = process_query_core(
+        query, 
+        qdrant_client, 
+        embedding_model, 
+        collection_name, 
+        canonical_folder_path,
+        args.cutoff
+    ).await?;
 
-    // --- Phase 7: Search Qdrant ---
-    info!("Stage [Query]: Searching Qdrant...");
-    info!("Searching for relevant files...");
-    let query_vector_f32: Vec<f32> = query_embedding.vec.into_iter().map(|v| v as f32).collect();
-
-    let search_result = qdrant_client
-        .search_points(
-            SearchPointsBuilder::new(collection_name, query_vector_f32, 100) // Limit results
-                .with_payload(true) // Request payload to get file path
-                .score_threshold(args.cutoff), // Apply relevance cutoff
-        )
-        .await
-        .context("Failed to search Qdrant")?;
-    info!(
-        "Found {} potential matching chunks.",
-        search_result.result.len()
-    );
-    info!("Stage [Query]: Qdrant search complete.");
-
-    // --- Phase 8: Aggregate Results by File Path ---
-    info!("Stage [Query]: Aggregating results by file path...");
-    // Group results by file path, keeping the highest score for each file.
-    let mut file_scores: HashMap<String, f32> = HashMap::new();
-    for hit in search_result.result {
-        if let Some(path_val) = hit.payload.get("path") {
-            if let Some(absolute_path_str) = path_val.as_str() {
-                let score = hit.score;
-                file_scores
-                    .entry(absolute_path_str.to_string())
-                    .and_modify(|e| *e = e.max(score)) // Update score if higher
-                    .or_insert(score); // Insert if new
-            } else {
-                warn!(
-                    "Found hit with non-string 'path' payload: {:?}",
-                    hit.payload
-                );
-            }
-        } else {
-            warn!("Found hit without 'path' payload: {:?}", hit.payload);
-        }
-    }
-    info!("Stage [Query]: Results aggregated.");
-
-    // --- Phase 9: Format and Print Aggregated Results as JSON ---
-    info!("Stage [Query]: Formatting and printing results...");
-    // Convert absolute paths to relative paths and sort by score.
-    let mut aggregated_results: Vec<(f32, String)> = file_scores
-        .into_iter()
-        .filter_map(|(absolute_path_str, score)| {
-            let absolute_path = PathBuf::from(&absolute_path_str);
-            match absolute_path.strip_prefix(canonical_folder_path) {
-                Ok(relative_path) => Some((score, relative_path.to_string_lossy().to_string())),
-                Err(e) => {
-                    warn!(
-                        "Failed to make path relative: Cannot strip prefix '{}' from path '{}': {}. Skipping result.",
-                        canonical_folder_path.display(), absolute_path_str, e
-                    );
-                    None
-                }
-            }
-        })
-        .collect();
-
-    // Sort by score descending
-    aggregated_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Prepare JSON output structure: {"files_by_relevance": [[score, path], ...]}
-    let json_output_map = HashMap::from([("files_by_relevance", aggregated_results)]);
-
-    if json_output_map["files_by_relevance"].is_empty() {
+    // Print the results
+    info!("Stage [Query]: Printing results...");
+    if json_output["files_by_relevance"].as_array().map_or(true, |arr| arr.is_empty()) {
         info!(
             "No files found matching the query with cutoff {}",
             args.cutoff
@@ -1190,7 +1282,7 @@ async fn process_query(
         println!("{}", serde_json::json!({ "files_by_relevance": [] }));
     } else {
         info!("Printing results as JSON:");
-        match serde_json::to_string_pretty(&json_output_map) {
+        match serde_json::to_string_pretty(&json_output) {
             Ok(json_str) => println!("{}", json_str),
             Err(e) => error!("Failed to serialize results to JSON: {}", e),
         }
