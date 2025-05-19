@@ -29,7 +29,7 @@ Groma requires a running Qdrant vector database instance. You can easily start o
 
 ```bash
 mkdir ~/.qdrant_data
-docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant   -v $HOME/.qdrant_data:/qdrant/storage
+docker run -v $HOME/.qdrant_data:/qdrant/storage -p 6333:6333 -p 6334:6334 qdrant/qdrant
 ```
 
 This command exposes Qdrant's HTTP API on port 6333 and its gRPC API (which Groma uses) on port 6334, and makes sure the data is persisted locally.
