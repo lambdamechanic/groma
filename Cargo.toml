@@ -7,6 +7,14 @@ edition = "2021"
 debug = true # Enable debug symbols in release builds
 
 [dependencies]
+
+[features]
+mcp = [
+    "mcp-core",
+    "mcp-server",
+    "tower-service",
+    "async-trait",
+]
 # Use rig-core from GitHub, specifying subfolder in https://github.com/lambdamechanic/rig
 rig-core = { git = "https://github.com/lambdamechanic/rig", subdir = "rig-core" }
 # rig-openrouter = "0.11" # Removed - OpenRouter is part of rig crate features
@@ -32,8 +40,8 @@ text-splitter = { version = "0.4.5", features = ["tiktoken-rs"] } # For chunking
 tiktoken-rs = "0.5" # Required by text_splitter feature
 
 # MCP Server dependencies
-mcp-core = { git = "https://github.com/block/goose", branch = "main", package = "mcp-core" }
-mcp-server = { git = "https://github.com/block/goose", branch = "main", package = "mcp-server" }
+# mcp-core = { git = "https://github.com/block/goose", branch = "main", package = "mcp-core" }
+# mcp-server = { git = "https://github.com/block/goose", branch = "main", package = "mcp-server" }
 tower-service = "0.3" # Required for Service trait
 pin-project = "1.1" # Required for pin-project macro
 async-trait = "0.1" # Required for async traits

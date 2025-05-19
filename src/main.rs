@@ -49,6 +49,7 @@ use url::Url;
 use uuid::Uuid;
 
 // Import our MCP server module
+#[cfg(feature = "mcp")]
 mod mcp_server;
 
 // --- Constants ---
@@ -436,6 +437,7 @@ async fn main() -> Result<()> {
     // Handle subcommands
     if let Some(command) = &args.command {
         match command {
+            #[cfg(feature = "mcp")]
             Commands::Mcp { debug } => {
                 // Use the debug flag from the subcommand
                 let debug_enabled = args.debug || *debug;
