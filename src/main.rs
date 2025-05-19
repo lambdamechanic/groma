@@ -9,7 +9,7 @@ use std::{
 
 // External crate imports
 use anyhow::{anyhow, Context, Result}; // Removed bail
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use git2::{Delta, DiffOptions, Oid, Repository}; // Added Delta, DiffOptions, Oid, Removed Status
 use hex; // Added for encoding hashes
 use qdrant_client::{
@@ -48,6 +48,9 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use url::Url;
 use uuid::Uuid;
 
+// Import our MCP server module
+mod mcp_server;
+
 // --- Constants ---
 
 /// The embedding dimension used by the default OpenAI model (`text-embedding-3-small`).
@@ -70,11 +73,11 @@ const MAX_TOKENS_PER_EMBEDDING_REQUEST: usize = 200_000;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to the folder within a Git repository to scan.
-    folder: PathBuf,
+    folder: Option<PathBuf>,
 
     /// Relevance cutoff for results (e.g., 0.7). Only results with a score
     /// above this threshold will be shown.
-    #[arg(short, long)]
+    #[arg(short, long, default_value_t = 0.7)]
     cutoff: f32,
 
     /// OpenAI API Key. Can also be set via the OPENAI_API_KEY environment variable.
@@ -98,6 +101,20 @@ struct Args {
     /// Enable debug logging. By default, only errors are logged unless RUST_LOG is set.
     #[arg(long)]
     debug: bool,
+
+    /// Subcommands
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Run as an MCP server using stdio for communication
+    Mcp {
+        /// Enable debug logging. By default, only errors are logged unless RUST_LOG is set.
+        #[arg(long)]
+        debug: bool,
+    },
 }
 
 // --- Data Structures ---
@@ -415,91 +432,110 @@ async fn upsert_batch(
 async fn main() -> Result<()> {
     // 1. Parse Arguments & Initialize Logging
     let args = Args::parse();
-    initialize_logging(args.debug);
-    info!("Starting Groma process...");
+    
+    // Handle subcommands
+    if let Some(command) = &args.command {
+        match command {
+            Commands::Mcp { debug } => {
+                // Use the debug flag from the subcommand
+                let debug_enabled = args.debug || *debug;
+                initialize_logging(debug_enabled);
+                info!("Running in MCP server mode");
+                return mcp_server::run_mcp_server().await;
+            }
+        }
+    } else if let Some(folder) = &args.folder {
+        // Initialize logging for CLI mode
+        initialize_logging(args.debug);
+        info!("Starting Groma process...");
+        // If we get here, we're running in normal CLI mode
+        // Initialize Tokenizer early
+        info!("Stage: Initializing tokenizer...");
+        let tokenizer = cl100k_base().context("Failed to load cl100k_base tokenizer")?;
+        info!("Stage: Tokenizer initialized.");
 
-    // Initialize Tokenizer early
-    info!("Stage: Initializing tokenizer...");
-    let tokenizer = cl100k_base().context("Failed to load cl100k_base tokenizer")?;
-    info!("Stage: Tokenizer initialized.");
+        // 2. Canonicalize Folder Path (used for relative path calculation later)
+        let canonical_folder_path = fs::canonicalize(folder).with_context(|| {
+            format!(
+                "Failed to canonicalize input folder path: {}",
+                folder.display()
+            )
+        })?;
+        info!(
+            "Using canonical folder path: {}",
+            canonical_folder_path.display()
+        );
+        info!("Stage: Canonicalized folder path.");
 
-    // 2. Canonicalize Folder Path (used for relative path calculation later)
-    let canonical_folder_path = fs::canonicalize(&args.folder).with_context(|| {
-        format!(
-            "Failed to canonicalize input folder path: {}",
-            args.folder.display()
-        )
-    })?;
-    info!(
-        "Using canonical folder path: {}",
-        canonical_folder_path.display()
-    );
-    info!("Stage: Canonicalized folder path.");
+        // 3. Initialize Clients (OpenAI, Qdrant)
+        info!("Stage: Initializing clients...");
+        let openai_client = rig::providers::openai::Client::new(&args.openai_key);
+        let embedding_model: Arc<openai::EmbeddingModel> =
+            Arc::new(openai_client.embedding_model(&args.openai_model));
+        info!(
+            "Using OpenAI Embedding model: {} (Dimension: {})",
+            args.openai_model, EMBEDDING_DIMENSION
+        );
+        let qdrant_client = Arc::new(Qdrant::from_url(&args.qdrant_url.to_string()).build()?);
+        info!("Connected to Qdrant at {}", args.qdrant_url);
+        info!("Stage: Clients initialized.");
 
-    // 3. Initialize Clients (OpenAI, Qdrant)
-    info!("Stage: Initializing clients...");
-    let openai_client = rig::providers::openai::Client::new(&args.openai_key);
-    let embedding_model: Arc<openai::EmbeddingModel> =
-        Arc::new(openai_client.embedding_model(&args.openai_model));
-    info!(
-        "Using OpenAI Embedding model: {} (Dimension: {})",
-        args.openai_model, EMBEDDING_DIMENSION
-    );
-    let qdrant_client = Arc::new(Qdrant::from_url(&args.qdrant_url.to_string()).build()?);
-    info!("Connected to Qdrant at {}", args.qdrant_url);
-    info!("Stage: Clients initialized.");
+        // 4. Determine Collection Name & Ensure It Exists
+        info!("Stage: Determining collection name...");
+        let collection_name = generate_collection_name(folder)?;
+        info!("Using Qdrant collection: {}", collection_name);
+        ensure_qdrant_collection(qdrant_client.clone(), &collection_name).await?;
+        info!("Stage: Qdrant collection ensured.");
 
-    // 4. Determine Collection Name & Ensure It Exists
-    info!("Stage: Determining collection name...");
-    let collection_name = generate_collection_name(&args.folder)?;
-    info!("Using Qdrant collection: {}", collection_name);
-    ensure_qdrant_collection(qdrant_client.clone(), &collection_name).await?;
-    info!("Stage: Qdrant collection ensured.");
+        // 5. Discover Repository and Perform File Updates if not suppressed
+        info!("Stage: Discovering Git repository...");
+        let repo = Repository::discover(folder).with_context(|| {
+            format!(
+                "Failed to find Git repository containing path: {}",
+                folder.display()
+            )
+        })?;
+        let workdir = repo
+            .workdir()
+            .ok_or_else(|| anyhow!("Git repository is bare, cannot process files"))?;
+        info!("Found Git repository at: {}", workdir.display());
+        info!("Stage: Git repository discovered.");
 
-    // 5. Discover Repository and Perform File Updates if not suppressed
-    info!("Stage: Discovering Git repository...");
-    let repo = Repository::discover(&args.folder).with_context(|| {
-        format!(
-            "Failed to find Git repository containing path: {}",
-            args.folder.display()
-        )
-    })?;
-    let workdir = repo
-        .workdir()
-        .ok_or_else(|| anyhow!("Git repository is bare, cannot process files"))?;
-    info!("Found Git repository at: {}", workdir.display());
-    info!("Stage: Git repository discovered.");
+        if !args.suppress_updates {
+            info!("Stage: Starting file updates...");
+            perform_file_updates(
+                &args,
+                &repo,               // Pass repository reference
+                qdrant_client.clone(),
+                embedding_model.clone(),
+                &tokenizer, // Pass tokenizer reference
+                &collection_name,
+                &canonical_folder_path, // Pass canonical folder path
+            )
+            .await?;
+        } else {
+            info!("Skipping file updates (--suppress-updates specified).");
+        }
+        info!("Stage: File updates complete (or skipped).");
 
-    if !args.suppress_updates {
-        info!("Stage: Starting file updates...");
-        perform_file_updates(
+        // 6. Process User Query (Read, Embed, Search, Format Output)
+        info!("Stage: Starting query processing...");
+        process_query(
             &args,
-            &repo,               // Pass repository reference
             qdrant_client.clone(),
             embedding_model.clone(),
-            &tokenizer, // Pass tokenizer reference
             &collection_name,
-            &canonical_folder_path, // Pass canonical folder path
+            &canonical_folder_path,
         )
         .await?;
+        info!("Stage: Query processing complete.");
+
+        info!("Groma process finished successfully.");
     } else {
-        info!("Skipping file updates (--suppress-updates specified).");
+        // Neither folder nor subcommand was provided
+        return Err(anyhow!("Either a folder path or a subcommand must be provided. Use --help for more information."));
     }
-    info!("Stage: File updates complete (or skipped).");
-
-    // 6. Process User Query (Read, Embed, Search, Format Output)
-    info!("Stage: Starting query processing...");
-    process_query(
-        &args,
-        qdrant_client.clone(),
-        embedding_model.clone(),
-        &collection_name,
-        &canonical_folder_path,
-    )
-    .await?;
-    info!("Stage: Query processing complete.");
-
-    info!("Groma process finished successfully.");
+    
     Ok(())
 } // Close main function block here
 
@@ -604,7 +640,8 @@ async fn perform_file_updates(
     diff_opts.include_untracked(false); // Don't include untracked files
     diff_opts.include_typechange(true); // Detect type changes (file to dir etc.)
                                         // Convert the target folder path to be relative to the workdir for pathspec
-    let pathspec = args.folder.strip_prefix(workdir).unwrap_or(&args.folder);
+    let folder = args.folder.as_ref().expect("Folder is required for file updates");
+    let pathspec = folder.strip_prefix(workdir).unwrap_or(folder);
     diff_opts.pathspec(pathspec); // Limit diff to the target folder relative to repo root
     info!("Using pathspec for diff: {}", pathspec.display());
 

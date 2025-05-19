@@ -29,3 +29,10 @@ uuid = { version = "1.16.0", features = ["v5"] } # Update UUID and enable v5 for
 url = "2.5" # For parsing Qdrant URL
 text-splitter = { version = "0.4.5", features = ["tiktoken-rs"] } # For chunking text by tokens (Specify patch)
 tiktoken-rs = "0.5" # Required by text_splitter feature
+
+# MCP Server dependencies
+mcp-core = { git = "https://github.com/block/goose", branch = "main", package = "mcp-core" }
+mcp-server = { git = "https://github.com/block/goose", branch = "main", package = "mcp-server" }
+tower-service = "0.3" # Required for Service trait
+pin-project = "1.1" # Required for pin-project macro
+async-trait = "0.1" # Required for async traits
