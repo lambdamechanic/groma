@@ -89,6 +89,12 @@ You also need an OpenAI API key.
     }
     ```
 
+4. Running as an MCP server
+
+You can run groma as an mcp server for agents like Claude Code, Goose, VS Code and more
+
+Run `groma mcp` as the command from the agent and it will run from stdin as per the MCP protocol
+
 ## Helper Scripts
 
 The `scripts/` directory contains `jq` scripts to process Groma's JSON output for different purposes.
