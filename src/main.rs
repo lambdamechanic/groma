@@ -49,7 +49,6 @@ use url::Url;
 use uuid::Uuid;
 
 // Import our MCP server module
-#[cfg(feature = "mcp")]
 mod mcp_server;
 
 // --- Constants ---
@@ -110,8 +109,7 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    #[cfg_attr(feature = "mcp", command(about = "Run as an MCP server using stdio for communication"))]
-    #[cfg_attr(not(feature = "mcp"), command(about = "Run as an MCP server (disabled; rebuild with --features \"mcp\")"))]
+    #[command(about = "Run as an MCP server using stdio for communication")]
     Mcp {
         /// Enable debug logging. By default, only errors are logged unless RUST_LOG is set.
         #[arg(long)]
@@ -438,7 +436,6 @@ async fn main() -> Result<()> {
     // Handle subcommands
     if let Some(command) = &args.command {
         match command {
-            #[cfg(feature = "mcp")]
             Commands::Mcp { debug } => {
                 // Use the debug flag from the subcommand
                 let debug_enabled = args.debug || *debug;
@@ -446,8 +443,6 @@ async fn main() -> Result<()> {
                 info!("Running in MCP server mode");
                 return mcp_server::run_mcp_server().await;
             },
-            #[cfg(not(feature = "mcp"))]
-            _ => return Err(anyhow!("MCP feature is not enabled; rebuild with --features \"mcp\"")),
         }
     } else if let Some(folder) = &args.folder {
         // Initialize logging for CLI mode

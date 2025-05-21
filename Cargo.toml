@@ -6,15 +6,6 @@ edition = "2021"
 [profile.release]
 debug = true # Enable debug symbols in release builds
 
-
-[features]
-mcp = [
-    "mcp-core",
-    "mcp-server",
-    "tower-service",
-    "async-trait",
-    "pin-project"
-]
 # rig-openrouter = "0.11" # Removed - OpenRouter is part of rig crate features
 
 [dependencies]
@@ -41,9 +32,9 @@ url = "2.5" # For parsing Qdrant URL
 text-splitter = { version = "0.4.5", features = ["tiktoken-rs"] } # For chunking text by tokens (Specify patch)
 tiktoken-rs = "0.5" # Required by text_splitter feature
 
-# MCP Server dependencies - using local paths
-mcp-core = { path = "src/mcp-sdk/mcp-core", optional = true }
-mcp-server = { path = "src/mcp-sdk/mcp-server", optional = true }
-tower-service = { version = "0.3", optional = true } # Required for Service trait
-pin-project = { version = "1.1", optional = true } # Required for pin-project macro
-async-trait = { version = "0.1", optional = true } # Required for async traits
+# MCP Server dependencies - always included
+mcp-core = { path = "src/mcp-sdk/mcp-core" }
+mcp-server = { path = "src/mcp-sdk/mcp-server" }
+tower-service = "0.3" # Required for Service trait
+pin-project = "1.1" # Required for pin-project macro
+async-trait = "0.1" # Required for async traits
