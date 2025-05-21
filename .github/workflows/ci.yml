@@ -19,7 +19,5 @@ jobs:
         with:
           path: target
           key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
-      - name: Build without MCP
+      - name: Build
         run: cargo build --locked
-      - name: Build with MCP
-        run: cargo build --locked --features mcp
