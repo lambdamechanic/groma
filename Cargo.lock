@@ -1322,7 +1322,6 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 [[package]]
 name = "mcp-core"
 version = "0.1.0"
-source = "git+https://github.com/block/goose?branch=main#41c67eb2c374a0c2587e1d55286b2b172a37fba8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1339,7 +1338,6 @@ dependencies = [
 [[package]]
 name = "mcp-macros"
 version = "0.1.0"
-source = "git+https://github.com/block/goose?branch=main#41c67eb2c374a0c2587e1d55286b2b172a37fba8"
 dependencies = [
  "async-trait",
  "convert_case",
@@ -1355,7 +1353,6 @@ dependencies = [
 [[package]]
 name = "mcp-server"
 version = "0.1.0"
-source = "git+https://github.com/block/goose?branch=main#41c67eb2c374a0c2587e1d55286b2b172a37fba8"
 dependencies = [
  "anyhow",
  "async-trait",

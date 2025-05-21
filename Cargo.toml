@@ -41,9 +41,9 @@ url = "2.5" # For parsing Qdrant URL
 text-splitter = { version = "0.4.5", features = ["tiktoken-rs"] } # For chunking text by tokens (Specify patch)
 tiktoken-rs = "0.5" # Required by text_splitter feature
 
-# MCP Server dependencies
-mcp-core = { git = "https://github.com/block/goose", branch = "main", package = "mcp-core", optional = true }
-mcp-server = { git = "https://github.com/block/goose", branch = "main", package = "mcp-server", optional = true }
+# MCP Server dependencies - using local paths
+mcp-core = { path = "src/mcp-sdk/mcp-core", optional = true }
+mcp-server = { path = "src/mcp-sdk/mcp-server", optional = true }
 tower-service = { version = "0.3", optional = true } # Required for Service trait
 pin-project = { version = "1.1", optional = true } # Required for pin-project macro
 async-trait = { version = "0.1", optional = true } # Required for async traits
