@@ -1,0 +1,4 @@
+# Add patterns here to exclude files from Groma processing (same syntax as .gitignore)
+# For example:
+# *.log
+# build/
