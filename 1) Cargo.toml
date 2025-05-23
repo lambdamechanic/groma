@@ -1,0 +1,41 @@
+[package]
+name = "groma"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+debug = true # Enable debug symbols in release builds
+
+# rig-openrouter = "0.11" # Removed - OpenRouter is part of rig crate features
+
+[dependencies]
+# Use rig-core from GitHub
+rig-core = { git = "https://github.com/lambdamechanic/rig" }
+once_cell = "1.18.0"
+rig-qdrant = "0.1.12"    # Update to latest patch compatible with rig 0.11
+qdrant-client = "1.14.0" # Update to the version used in rig-qdrant examples
+clap = { version = "4.4", features = ["derive", "env"] } # Add 'env' feature
+tokio = { version = "1", features = ["full"] }
+sha2 = "0.10"
+hex = "0.4"
+walkdir = "2.4" # Keep for now, might remove later if fully replaced
+git2 = "0.19" # Add git2 crate
+ignore = "0.4" # Add ignore crate for .gromaignore support
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0" # For state serialization
+futures = "0.3"
+# tabled = "0.15" # Removed tabled dependency
+uuid = { version = "1.16.0", features = ["v5"] } # Update UUID and enable v5 for path hashing
+url = "2.5" # For parsing Qdrant URL
+text-splitter = { version = "0.4.5", features = ["tiktoken-rs"] } # For chunking text by tokens (Specify patch)
+tiktoken-rs = "0.5" # Required by text_splitter feature
+
+# MCP Server dependencies - always included
+mcp-core = { path = "src/mcp-sdk/mcp-core" }
+mcp-server = { path = "src/mcp-sdk/mcp-server" }
+tower-service = "0.3" # Required for Service trait
+pin-project = "1.1" # Required for pin-project macro
+async-trait = "0.1" # Required for async traits
