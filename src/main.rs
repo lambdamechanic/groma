@@ -609,6 +609,20 @@ async fn perform_file_updates(
         .ok_or_else(|| anyhow!("Git repository is bare, cannot process files"))?;
     info!("Stage [Update]: Determined workdir.");
 
+    // Build ignore matcher for .gitignore and .gromaignore
+    let mut ignore_builder = GitignoreBuilder::new(&workdir);
+    let gitignore_path = workdir.join(".gitignore");
+    if gitignore_path.exists() {
+        ignore_builder.add(gitignore_path);
+    }
+    let gromaignore_path = canonical_folder_path.join(".gromaignore");
+    if gromaignore_path.exists() {
+        ignore_builder.add(gromaignore_path);
+    }
+    let ignore_matcher = ignore_builder
+        .build()
+        .context("Failed to build ignore matcher")?;
+
     // --- Phase 1: Load State & Determine Git Diff ---
     info!("Stage [Update]: Loading previous state...");
     let previous_state = load_state(repo)?;
@@ -674,6 +688,15 @@ async fn perform_file_updates(
         current_tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
             if let Some(entry_name) = entry.name() { // Use name() instead of path()
                 let full_path = workdir.join(root).join(entry_name); // Construct full path
+
+                // Skip files ignored by .gitignore or .gromaignore
+                let rel_full_path = full_path
+                    .strip_prefix(&workdir)
+                    .unwrap_or(&full_path);
+                if ignore_matcher.matched(rel_full_path, false).is_ignore() {
+                    debug!("Skipping ignored file (first run): {}", rel_full_path.display());
+                    return git2::TreeWalkResult::Ok;
+                }
                 // Filter: Ensure the path is within the canonical target folder
                 if full_path.starts_with(canonical_folder_path) && entry.kind() == Some(git2::ObjectType::Blob) {
                     if let Ok(canonical_path) = fs::canonicalize(&full_path) {
@@ -724,6 +747,14 @@ async fn perform_file_updates(
                  old_repo_path, new_repo_path, delta
              );
             continue;
+        }
+
+        // Skip files ignored by .gitignore or .gromaignore
+        if let Some(rel_path) = relevant_path_for_filter.and_then(|p| p.strip_prefix(&workdir).ok()) {
+            if ignore_matcher.matched(rel_path, false).is_ignore() {
+                debug!("Skipping ignored file (diff): {:?}", rel_path);
+                continue;
+            }
         }
         // --- End Filter ---
 
