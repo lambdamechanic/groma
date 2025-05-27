@@ -31,6 +31,7 @@ uuid = { version = "1.16.0", features = ["v5"] } # Update UUID and enable v5 for
 url = "2.5" # For parsing Qdrant URL
 text-splitter = { version = "0.4.5", features = ["tiktoken-rs"] } # For chunking text by tokens (Specify patch)
 tiktoken-rs = "0.5" # Required by text_splitter feature
+ignore = "0.4" # For filtering output using .gromaignore
 
 # MCP Server dependencies - always included
 mcp-core = { path = "src/mcp-sdk/mcp-core" }

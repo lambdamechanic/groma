@@ -46,6 +46,7 @@ use tiktoken_rs::{cl100k_base, CoreBPE};
 use tracing::{debug, error, info, warn}; // Removed Level
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use url::Url;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use uuid::Uuid;
 
 // Import our MCP server module
@@ -1227,6 +1228,18 @@ pub async fn process_query_core(
 
     // Sort by score descending
     aggregated_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Filter out paths matching patterns in .gromaignore (if present)
+    let ignore_file = canonical_folder_path.join(".gromaignore");
+    if ignore_file.exists() {
+        let mut builder = GitignoreBuilder::new(canonical_folder_path);
+        builder.add(ignore_file);
+        if let Ok(matcher) = builder.build() {
+            aggregated_results.retain(|(_, rel_path)| {
+                !matcher.matched(rel_path, false).is_ignore()
+            });
+        }
+    }
 
     // Prepare JSON output structure: {"files_by_relevance": [[score, path], ...]}
     let json_output = serde_json::json!({
