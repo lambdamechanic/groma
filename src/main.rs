@@ -46,11 +46,20 @@ use tiktoken_rs::{cl100k_base, CoreBPE};
 use tracing::{debug, error, info, warn}; // Removed Level
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use url::Url;
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::gitignore::GitignoreBuilder;
 use uuid::Uuid;
 
 // Import our MCP server module
 mod mcp_server;
+
+// Module declarations
+mod vector_store;
+
+#[cfg(feature = "qdrant")]
+mod vector_store_qdrant;
+
+#[cfg(feature = "lancedb")]
+mod vector_store_lancedb;
 
 // --- Constants ---
 
@@ -89,12 +98,23 @@ struct Args {
     #[arg(long, default_value = "text-embedding-3-small")]
     openai_model: String,
 
+    /// Vector store backend to use (qdrant or lancedb).
+    #[arg(long, env = "VECTOR_STORE", default_value = "qdrant")]
+    vector_store: String,
+
     /// Qdrant server URL (points to the gRPC port, e.g., http://localhost:6334).
     /// Can also be set via the QDRANT_URL environment variable.
+    /// Only used when vector_store is "qdrant".
     #[arg(long, env = "QDRANT_URL", default_value = "http://localhost:6334")]
     qdrant_url: Url,
 
-    /// Suppress checking for file updates and upserting to Qdrant.
+    /// LanceDB data directory path.
+    /// Can also be set via the LANCEDB_PATH environment variable.
+    /// Only used when vector_store is "lancedb".
+    #[arg(long, env = "LANCEDB_PATH", default_value = "~/.groma/lancedb")]
+    lancedb_path: String,
+
+    /// Suppress checking for file updates and upserting to vector store.
     /// Useful for querying existing data without modifying the index.
     #[arg(long)]
     suppress_updates: bool,
@@ -390,7 +410,7 @@ async fn delete_points_by_path(
     )]);
 
     // Use the filter to specify which points to delete.
-    // Note: Constructing DeletePoints directly as the builder might have issues depending on the client version.
+    // Note: Constructinging DeletePoints directly as the builder might have issues depending on the client version.
     let delete_request = qdrant_client::qdrant::DeletePoints {
         collection_name: collection_name.to_string(),
         wait: None, // Set to Some(true) to wait for operation completion if needed
