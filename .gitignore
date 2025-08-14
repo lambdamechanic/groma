@@ -1,3 +1,5 @@
 target
 .aider*
 .fastembed_cache
+lancedb_data
+.groma_lancedb
