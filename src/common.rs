@@ -1,28 +1,19 @@
 // Common functionality shared between Qdrant and LanceDB implementations
 
 use anyhow::{Result, Context, anyhow};
-use git2::{Repository, Oid, Delta, DiffOptions};
+use git2::Repository;
 use ignore::gitignore::{GitignoreBuilder, Gitignore};
-use rig::{
-    embeddings::{
-        embed::{Embed, EmbedError, TextEmbedder},
-        embedding::EmbeddingModel,
-        EmbeddingsBuilder,
-    },
-    providers::openai,
-    OneOrMany,
-};
+use rig::providers::openai;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
     fs,
-    io::{self, BufReader},
+    io::BufReader,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tiktoken_rs::{cl100k_base, CoreBPE};
-use tracing::{debug, error, info, warn};
+use tiktoken_rs::CoreBPE;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 // --- Constants ---

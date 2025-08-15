@@ -6,7 +6,7 @@ use arrow_array::{ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, Recor
 use arrow_schema::{DataType, Field, Schema};
 use clap::Parser;
 use fastembed::{TextEmbedding, EmbeddingModel, InitOptions};
-use git2::{Repository, Oid, Delta, DiffOptions};
+use git2::Repository;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::table::Table;
 use serde::Serialize;
@@ -27,7 +27,6 @@ use futures::TryStreamExt;
 use ignore::WalkBuilder;
 
 const EMBEDDING_DIMENSION: usize = 384; // AllMiniLML6V2 dimension
-const TARGET_CHUNK_SIZE_TOKENS: usize = 8192;
 
 /// Command-line arguments - matches the original groma interface
 #[derive(Parser, Debug)]
@@ -225,7 +224,7 @@ impl LanceDBStore {
             Ok(r) => r,
             Err(e) => {
                 debug!("Error querying table (probably empty): {}", e);
-                return Ok(files); // Return empty HashMap if table is empty/new
+                return Ok(files); // Return empty HashMap if table is empty
             }
         };
         
@@ -397,18 +396,16 @@ async fn perform_file_updates(
         let path = entry.path();
         debug!("Found file: {}", path.display());
 
-        // Skip hidden files
-        if path.file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.starts_with('.'))
-            .unwrap_or(false) 
-        {
-            continue;
-        }
-        
-        // Skip if ignored
-        if gitignore.matched(path, false).is_ignore() {
-            continue;
+        // WalkBuilder already skips hidden files and respects .gitignore
+        // But we can double-check with our gromaignore if it exists
+        if gromaignore_path.exists() {
+            // Need to get relative path for gitignore matcher
+            if let Ok(rel_path) = path.strip_prefix(canonical_folder_path) {
+                if gitignore.matched(rel_path, false).is_ignore() {
+                    debug!("Skipping file due to .gromaignore: {}", path.display());
+                    continue;
+                }
+            }
         }
         
         // Check file extension - only process known text/code files
