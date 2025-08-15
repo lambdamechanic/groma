@@ -1,133 +1,133 @@
 # Groma
 
-Groma is a command-line tool that scans a folder within a Git repository, embeds the content of tracked files using OpenAI, stores these embeddings in a Qdrant vector database, and allows you to query for relevant files based on semantic similarity.
+A semantic code search tool for Git repositories that uses vector embeddings to find relevant files based on natural language queries.
 
-## Why Groma?
+## Two Versions Available
 
-I tend to use this with [aider](https://aider.chat). Aider has a repo-map feature, where it will include a succinct description of your repository in the prompt, but it rather falls over with massive monorepos.
-Groma lets you pay the indexing cost once, and then repair the indices incrementally as files change: this means that querying is usually free, once the embeddings are done, and you could share a qdrant instance between users to reduce costs further.
+### 1. `groma` - Cloud-based with Qdrant
+- Uses **Qdrant** vector database (requires Docker)
+- Uses **OpenAI API** for embeddings (requires API key, costs money)
+- Higher quality embeddings
+- Needs internet connection
 
-## No, I mean, why "Groma"?
-<table border="0" cellspacing="0" style="border: none;">
-<tr>
-<td valign="top" style="border: none;">
-The name comes from the <a href="https://en.wikipedia.org/wiki/Groma_(surveying)">groma</a>, a surveying instrument used in the Roman Empire. 
+### 2. `groma-lancedb` - Fully Local & Free
+- Uses **LanceDB** (embedded, no server needed)
+- Uses **local fastembed model** (AllMiniLML6V2)
+- 100% offline, no API calls
+- Completely free
+- Your code never leaves your machine
 
-Just as the ancient groma helped surveyors find straight lines and structure in the physical landscape, this tool helps you find relevant files (the "straight lines") within the structured landscape of your codebase.
-</td>
-<td valign="top" align="right" style="border: none;">
-<img src="https://github.com/lambdamechanic/groma/raw/main/assets/images/GromaNovotny.png" alt="Groma Surveying Tool" width="200"/>
-</td>
-</tr>
-</table>
-
-
-
-## Prerequisites
-
-Groma requires a running Qdrant vector database instance. You can easily start one using Docker:
+## Installation
 
 ```bash
-mkdir ~/.qdrant_data
-docker run -v $HOME/.qdrant_data:/qdrant/storage -p 6333:6333 -p 6334:6334 qdrant/qdrant
+# Clone the repository
+git clone https://github.com/yourusername/groma.git
+cd groma
+
+# Build both versions
+cargo build --release --features qdrant --bin groma
+cargo build --release --features lancedb --bin groma-lancedb
+
+# Install to your PATH
+cp target/release/groma ~/.local/bin/
+cp target/release/groma-lancedb ~/.local/bin/
 ```
-
-This command exposes Qdrant's HTTP API on port 6333 and its gRPC API (which Groma uses) on port 6334, and makes sure the data is persisted locally.
-
-You also need an OpenAI API key.
 
 ## Usage
 
-1.  **Set Environment Variables:**
-    *   Export your OpenAI API key:
-        ```bash
-        export OPENAI_API_KEY='your-api-key-here'
-        ```
-    *   Optionally, set the Qdrant URL if it's not running on the default `http://localhost:6334`:
-        ```bash
-        export QDRANT_URL='http://your-qdrant-host:6334'
-        ```
-
-2.  **Install the Tool:**
-    Navigate to the cloned repository directory and run:
-    ```bash
-    cargo install --path .
-    ```
-    This will compile the `groma` binary and place it in your Cargo bin directory (usually `~/.cargo/bin/`), making it available in your PATH.
-
-3.  **Run Groma:**
-
-    Groma reads your query from standard input (stdin). Pipe your query into the command or type it and press Ctrl+D.
-
-    **Example:** Find files related to "database connection pooling".
-
-    ```bash
-    echo "database connection pooling" | groma /path/to/your/repo/subdir --cutoff 0.3
-    ```
-
-    **Arguments:**
-
-    *   `<FOLDER_PATH>`: (Required) The path to the folder within a Git repository to scan. This is a positional argument.
-    *   `--cutoff <FLOAT>` or `-c <FLOAT>`: (Required) The relevance score cutoff (between 0.0 and 1.0). Only results with a score above this threshold will be shown. A higher value means stricter relevance.
-    *   `--openai-key <KEY>`: (Optional) Your OpenAI API key. Defaults to the `OPENAI_API_KEY` environment variable.
-    *   `--openai-model <MODEL_NAME>`: (Optional) The OpenAI embedding model to use. Defaults to `text-embedding-3-small`.
-    *   `--qdrant-url <URL>`: (Optional) The URL for the Qdrant gRPC endpoint. Defaults to `http://localhost:6334` or the `QDRANT_URL` environment variable.
-    *   `--suppress-updates`: (Optional Flag) If present, skips the initial scan, embedding, and upserting steps. Useful if you only want to query existing data.
-    *   `--debug`: (Optional Flag) Enables detailed debug logging. 
-
-    **Output:**
-
-    Groma outputs a JSON object containing a list of files sorted by relevance score (highest first):
-
-    ```json
-    {
-      "files_by_relevance": [
-        [ 0.85, "src/db/connection.rs" ],
-        [ 0.78, "config/database.yml" ],
-        [ 0.71, "docs/architecture.md" ]
-      ]
-    }
-    ```
-
-4. Running as an MCP server
-
-You can run groma as an mcp server for agents like Claude Code, Goose, VS Code and more
-
-Run `groma mcp` as the command from the agent and it will run from stdin as per the MCP protocol
-
-Make sure you turn on the `mcp` feature first (ie, `cargo build --features mcp`)
-
-## Helper Scripts
-
-The `scripts/` directory contains `jq` scripts to process Groma's JSON output for different purposes.
-I tend to put them in ~/.local/bin.
-
-### `scripts/gromaload.jq`
-
-This script transforms the output into a format suitable for loading files into tools like `aider` using a `.LOADCOMMANDS` file. 
-
-**Example Usage:**
-
-In an aider session:
-```
-> /run echo "flargle the snubwhippets" | groma . --cutoff 0.3 | gromaload.jq > .LOADCOMMANDS
-> /load .LOADCOMMANDS
-```
-
-I'm hoping at some point `aider` gets a little more straightforwardly scriptable.
-
-
-### `scripts/gromaprompt.jq`
-
-This script formats the output into a human-readable list suitable for including in prompts for Large Language Models (LLMs), indicating potentially relevant files.
-
-**Example Usage:**
+Both versions use the same command-line interface:
 
 ```bash
-# Run groma and pipe the output directly to prompt.jq
-> /run echo "COBOL translation layer" | groma . --cutoff 0.4 | gromaprompt.jq
-The relevant data may be in these files:
-- src/shinynewtranslater/cobol.rs
-- src/deepestdarkest/legacylayer/thatactuallydoesthejob/cobol.rs
-> make sure we're ready for the y10k bug
+# Basic usage - pipe your query through stdin
+echo "authentication logic" | groma /path/to/repo --cutoff 0.3
+
+# Or use the LanceDB version (no setup needed!)
+echo "authentication logic" | groma-lancedb /path/to/repo --cutoff 0.3
 ```
+
+### Options
+- `--cutoff` - Similarity threshold (0.0-1.0, default: 0.7)
+- `--suppress-updates` - Skip indexing, query existing data only
+- `--debug` - Enable debug logging
+
+## Setup Requirements
+
+### For `groma` (Qdrant version)
+
+1. **Start Qdrant Docker container:**
+```bash
+docker run -p 6334:6334 -v ~/.qdrant_data:/qdrant/storage qdrant/qdrant
+```
+
+2. **Set OpenAI API key:**
+```bash
+export OPENAI_API_KEY='your-api-key-here'
+```
+
+3. **Optional - Set custom Qdrant URL:**
+```bash
+export QDRANT_URL='http://your-qdrant-host:6334'
+```
+
+### For `groma-lancedb` (Local version)
+
+**No setup required!** Just run it. The first run will download the embedding model (~80MB) automatically.
+
+## How It Works
+
+1. **Indexing**: On first run, Groma scans your Git repository and creates embeddings for all tracked files
+2. **Incremental Updates**: Subsequent runs only process changed files
+3. **Semantic Search**: Your query is embedded and compared against the indexed files
+4. **Results**: Returns relevant file paths and content snippets in JSON format
+
+## File Filtering
+
+Both versions respect:
+- `.gitignore` - Files ignored by Git are not indexed
+- `.gromaignore` - Additional patterns to exclude from indexing
+- Only Git-tracked files are processed
+- Binary files are automatically skipped
+
+## Output Format
+
+Results are returned as JSON for easy integration with other tools:
+
+```json
+{
+  "path": "src/auth.rs",
+  "score": 0.82,
+  "content": "impl Authentication {\n    pub fn verify_token..."
+}
+```
+
+## Integration with Aider
+
+Groma works great with [aider](https://aider.chat) for AI-assisted coding:
+
+```bash
+# Use with aider's --read flag
+aider --read $(echo "authentication" | groma . --cutoff 0.3 | jq -r '.path')
+
+# Or use the helper script
+aider --read $(groma-files "authentication logic" .)
+```
+
+## Performance Comparison
+
+| Feature | `groma` (Qdrant) | `groma-lancedb` (Local) |
+|---------|------------------|-------------------------|
+| Setup Required | Docker + API Key | None |
+| Internet Required | Yes | No |
+| Cost | OpenAI API fees | Free |
+| Privacy | API calls | 100% local |
+| Embedding Quality | Higher | Good |
+| Speed | Fast after indexing | Fast after indexing |
+| Storage | External (Qdrant) | Local (.groma_lancedb) |
+
+## Why Groma?
+
+The name comes from the [groma](https://en.wikipedia.org/wiki/Groma_(surveying)), a surveying instrument used in the Roman Empire. Just as the ancient groma helped surveyors find structure in the physical landscape, this tool helps you find relevant files within your codebase.
+
+## License
+
+MIT
