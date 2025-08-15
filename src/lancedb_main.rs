@@ -1,21 +1,18 @@
-// LanceDB implementation of Groma - uses LOCAL embeddings (fastembed), NOT OpenAI
-// This version runs completely offline with no API calls
-
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray, Int32Array, types::Float32Type};
 use arrow_schema::{DataType, Field, Schema};
 use clap::Parser;
 use fastembed::{TextEmbedding, EmbeddingModel, InitOptions};
-use git2::Repository;
+use git2::{Repository, DiffOptions, Oid};
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::table::Table;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
-    io::{self, Read},
+    io::{self, Read, BufWriter},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -24,7 +21,6 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use ignore::gitignore::GitignoreBuilder;
 use uuid::Uuid;
 use futures::TryStreamExt;
-use ignore::WalkBuilder;
 
 const EMBEDDING_DIMENSION: usize = 384; // AllMiniLML6V2 dimension
 
@@ -52,6 +48,67 @@ struct Args {
     /// Enable debug logging.
     #[arg(long)]
     debug: bool,
+}
+
+/// Stores the state between runs, specifically the last processed Git commit OID.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct GromaState {
+    last_processed_oid: String,
+}
+
+// State Management Functions
+
+/// Returns the expected path for the .gromastate file within the repository's workdir.
+fn get_state_file_path(repo: &Repository) -> Result<PathBuf> {
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Cannot get state file path: repository is bare"))?;
+    Ok(workdir.join(".gromastate"))
+}
+
+/// Loads the GromaState from the .gromastate file.
+/// Returns Ok(None) if the file doesn't exist (first run).
+fn load_state(repo: &Repository) -> Result<Option<GromaState>> {
+    let state_file_path = get_state_file_path(repo)?;
+    if !state_file_path.exists() {
+        info!(
+            "No previous state file found at '{}'. Assuming first run.",
+            state_file_path.display()
+        );
+        return Ok(None);
+    }
+
+    let file = fs::File::open(&state_file_path)
+        .with_context(|| format!("Failed to open state file: {}", state_file_path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    let state: GromaState = serde_json::from_reader(reader).with_context(|| {
+        format!(
+            "Failed to deserialize state from: {}",
+            state_file_path.display()
+        )
+    })?;
+    info!("Loaded previous state (OID: {})", state.last_processed_oid);
+    Ok(Some(state))
+}
+
+/// Saves the given GromaState to the .gromastate file.
+fn save_state(repo: &Repository, state: &GromaState) -> Result<()> {
+    let state_file_path = get_state_file_path(repo)?;
+    debug!(
+        "Saving current state (OID: {}) to '{}'",
+        state.last_processed_oid,
+        state_file_path.display()
+    );
+    let file = fs::File::create(&state_file_path)
+        .with_context(|| format!("Failed to create state file: {}", state_file_path.display()))?;
+    serde_json::to_writer_pretty(BufWriter::new(file), state).with_context(|| {
+        format!(
+            "Failed to serialize state to: {}",
+            state_file_path.display()
+        )
+    })?;
+    info!("Saved current state (OID: {})", state.last_processed_oid);
+    Ok(())
 }
 
 // LanceDB-specific vector store implementation
@@ -213,51 +270,6 @@ impl LanceDBStore {
         warn!("Deletion not implemented for LanceDB - file {} will be re-indexed", file_path);
         Ok(())
     }
-
-    async fn get_existing_files(&self) -> Result<HashMap<String, String>> {
-        let mut files = HashMap::new();
-        
-        debug!("Querying existing files from LanceDB...");
-        
-        // Try to query the table - it might be empty on first run
-        let results = match self.table.query().execute().await {
-            Ok(r) => r,
-            Err(e) => {
-                debug!("Error querying table (probably empty): {}", e);
-                return Ok(files); // Return empty HashMap if table is empty
-            }
-        };
-        
-        let batches = match results.try_collect::<Vec<_>>().await {
-            Ok(b) => b,
-            Err(e) => {
-                debug!("Error collecting batches (probably empty table): {}", e);
-                return Ok(files); // Return empty HashMap if no data
-            }
-        };
-        
-        for batch in batches {
-            let paths = batch.column_by_name("path")
-                .ok_or_else(|| anyhow!("Missing path column"))?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| anyhow!("Invalid path column type"))?;
-            
-            let hashes = batch.column_by_name("hash")
-                .ok_or_else(|| anyhow!("Missing hash column"))?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| anyhow!("Invalid hash column type"))?;
-            
-            for i in 0..batch.num_rows() {
-                let path = paths.value(i).to_string();
-                let hash = hashes.value(i).to_string();
-                files.entry(path).or_insert(hash);
-            }
-        }
-        
-        Ok(files)
-    }
 }
 
 #[derive(Debug)]
@@ -339,12 +351,11 @@ async fn perform_file_updates(
     store: &LanceDBStore,
     canonical_folder_path: &Path,
 ) -> Result<()> {
-    info!("Checking for file updates...");
+    info!("Checking for file updates using Git diff...");
     
-    // Get existing files from the database
-    info!("Getting existing files from database...");
-    let existing_files = store.get_existing_files().await?;
-    info!("Found {} existing files in database", existing_files.len());
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Git repository is bare, cannot process files"))?;
     
     // Build gitignore matcher for both .gitignore and .gromaignore
     let mut gitignore_builder = GitignoreBuilder::new(canonical_folder_path);
@@ -365,50 +376,65 @@ async fn perform_file_updates(
     
     let gitignore = gitignore_builder.build()?;
     
-    // Walk through all files in the repository
-    let mut files_to_index = Vec::new();
-    let mut total_files = 0;
+    // Load previous state
+    info!("Loading previous state...");
+    let previous_state = load_state(repo)?;
+    let head_commit_oid = repo.head()?.peel_to_commit()?.id();
+    info!("Current HEAD OID: {}", head_commit_oid);
     
-    info!("Walking directory: {}", canonical_folder_path.display());
-    
-    // Use WalkBuilder which respects .gitignore automatically
-    let walker = WalkBuilder::new(canonical_folder_path)
-        .hidden(false)  // Don't process hidden files
-        .git_ignore(true)  // Respect .gitignore
-        .git_exclude(true)  // Also respect .git/info/exclude
-        .follow_links(false)
-        .build();
-    
-    for entry in walker {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                warn!("Error walking directory: {}", e);
-                continue;
-            }
-        };
-        
-        // Skip directories
-        if entry.file_type().map_or(false, |ft| ft.is_dir()) {
-            continue;
-        }
-        
-        let path = entry.path();
-        debug!("Found file: {}", path.display());
-
-        // WalkBuilder already skips hidden files and respects .gitignore
-        // But we can double-check with our gromaignore if it exists
-        if gromaignore_path.exists() {
-            // Need to get relative path for gitignore matcher
-            if let Ok(rel_path) = path.strip_prefix(canonical_folder_path) {
-                if gitignore.matched(rel_path, false).is_ignore() {
-                    debug!("Skipping file due to .gromaignore: {}", path.display());
-                    continue;
+    let previous_tree = match previous_state {
+        Some(ref state) => {
+            let oid = Oid::from_str(&state.last_processed_oid)
+                .with_context(|| format!("Failed to parse OID: {}", state.last_processed_oid))?;
+            match repo.find_commit(oid) {
+                Ok(commit) => match commit.tree() {
+                    Ok(tree) => Some(tree),
+                    Err(e) => {
+                        warn!(
+                            "Failed to find tree for previous OID {}: {}. Processing all files.",
+                            state.last_processed_oid, e
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        "Failed to find commit for previous OID {}: {}. Processing all files.",
+                        state.last_processed_oid, e
+                    );
+                    None
                 }
             }
         }
-        
-        // Check file extension - only process known text/code files
+        None => None, // First run, compare against empty tree
+    };
+    
+    // Prepare to collect files to process
+    let mut files_to_index = Vec::new();
+    let mut paths_to_delete = Vec::new();
+    let mut processed_paths: HashSet<PathBuf> = HashSet::new();
+    
+    // Configure diff options
+    let mut diff_opts = DiffOptions::new();
+    diff_opts.include_ignored(false);
+    diff_opts.include_untracked(false);
+    diff_opts.include_typechange(true);
+    
+    // Limit diff to the target folder
+    let pathspec = canonical_folder_path.strip_prefix(workdir).unwrap_or(canonical_folder_path);
+    diff_opts.pathspec(pathspec);
+    info!("Using pathspec for diff: {}", pathspec.display());
+    
+    // Get diff between previous tree and working directory
+    let diff = repo.diff_tree_to_workdir(previous_tree.as_ref(), Some(&mut diff_opts))?;
+    
+    info!(
+        "Git diff found {} changed items within the target folder.",
+        diff.deltas().len()
+    );
+    
+    // Helper function to check if file should be processed
+    let should_process_file = |path: &Path| -> bool {
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let allowed_extensions = vec![
             "rs", "py", "js", "ts", "jsx", "tsx", "java", "c", "cpp", "cc", "cxx", 
@@ -421,47 +447,151 @@ async fn perform_file_updates(
             "vim", "el", "lisp", "scm", "rkt", "hs", "lhs", "purs", "elm", "nim"
         ];
         
-        if !allowed_extensions.contains(&extension) && !path.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n == "Makefile" || n == "Dockerfile" || n == "Jenkinsfile" || n == "Vagrantfile")
-            .unwrap_or(false)
-        {
-            continue; // Skip files with unknown extensions
-        }
-        
-        // Check if file is tracked by git
-        if let Ok(relative_path) = path.strip_prefix(repo.workdir().unwrap()) {
-            if repo.status_file(&relative_path).is_err() {
-                continue; // Skip untracked files
+        allowed_extensions.contains(&extension) || 
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n == "Makefile" || n == "Dockerfile" || n == "Jenkinsfile" || n == "Vagrantfile")
+                .unwrap_or(false)
+    };
+    
+    // Process first run - all files in HEAD
+    if previous_tree.is_none() {
+        info!("First run detected. Processing all tracked files in target folder...");
+        let current_tree = repo.head()?.peel_to_tree()?;
+        current_tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+            if let Some(entry_name) = entry.name() {
+                let full_path = workdir.join(root).join(entry_name);
+                
+                // Check if within target folder
+                if !full_path.starts_with(canonical_folder_path) {
+                    return git2::TreeWalkResult::Ok;
+                }
+                
+                // Check gitignore
+                let rel_path = full_path.strip_prefix(workdir).unwrap_or(&full_path);
+                if gitignore.matched(rel_path, false).is_ignore() {
+                    debug!("Skipping ignored file: {}", rel_path.display());
+                    return git2::TreeWalkResult::Ok;
+                }
+                
+                // Only process files, not directories
+                if entry.kind() == Some(git2::ObjectType::Blob) {
+                    if should_process_file(&full_path) {
+                        // Read file content
+                        if let Ok(content) = fs::read_to_string(&full_path) {
+                            let path_str = full_path.strip_prefix(canonical_folder_path)
+                                .unwrap_or(&full_path)
+                                .to_string_lossy()
+                                .to_string();
+                            let hash = calculate_file_hash(&content);
+                            files_to_index.push((path_str, content, hash));
+                            processed_paths.insert(full_path);
+                        }
+                    }
+                }
+            }
+            git2::TreeWalkResult::Ok
+        })?;
+    } else {
+        // Process diff for incremental updates
+        for delta in diff.deltas() {
+            let new_file = delta.new_file();
+            let old_file = delta.old_file();
+            
+            match delta.status() {
+                git2::Delta::Added | git2::Delta::Modified | git2::Delta::Typechange => {
+                    if let Some(path) = new_file.path() {
+                        let full_path = workdir.join(path);
+                        
+                        // Check if within target folder
+                        if !full_path.starts_with(canonical_folder_path) {
+                            continue;
+                        }
+                        
+                        // Check gitignore
+                        if gitignore.matched(path, false).is_ignore() {
+                            debug!("Skipping ignored file: {}", path.display());
+                            continue;
+                        }
+                        
+                        if should_process_file(&full_path) && !processed_paths.contains(&full_path) {
+                            // Read file content
+                            if let Ok(content) = fs::read_to_string(&full_path) {
+                                let path_str = full_path.strip_prefix(canonical_folder_path)
+                                    .unwrap_or(&full_path)
+                                    .to_string_lossy()
+                                    .to_string();
+                                let hash = calculate_file_hash(&content);
+                                files_to_index.push((path_str, content, hash));
+                                processed_paths.insert(full_path);
+                            }
+                        }
+                    }
+                }
+                git2::Delta::Deleted => {
+                    if let Some(path) = old_file.path() {
+                        let full_path = workdir.join(path);
+                        if full_path.starts_with(canonical_folder_path) {
+                            let path_str = full_path.strip_prefix(canonical_folder_path)
+                                .unwrap_or(&full_path)
+                                .to_string_lossy()
+                                .to_string();
+                            paths_to_delete.push(path_str);
+                        }
+                    }
+                }
+                git2::Delta::Renamed => {
+                    // Handle rename as delete + add
+                    if let Some(old_path) = old_file.path() {
+                        let full_path = workdir.join(old_path);
+                        if full_path.starts_with(canonical_folder_path) {
+                            let path_str = full_path.strip_prefix(canonical_folder_path)
+                                .unwrap_or(&full_path)
+                                .to_string_lossy()
+                                .to_string();
+                            paths_to_delete.push(path_str);
+                        }
+                    }
+                    if let Some(new_path) = new_file.path() {
+                        let full_path = workdir.join(new_path);
+                        if full_path.starts_with(canonical_folder_path) && 
+                           should_process_file(&full_path) && 
+                           !processed_paths.contains(&full_path) {
+                            if let Ok(content) = fs::read_to_string(&full_path) {
+                                let path_str = full_path.strip_prefix(canonical_folder_path)
+                                    .unwrap_or(&full_path)
+                                    .to_string_lossy()
+                                    .to_string();
+                                let hash = calculate_file_hash(&content);
+                                files_to_index.push((path_str, content, hash));
+                                processed_paths.insert(full_path);
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-        
-        // Read file content
-        let content = match fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue, // Skip binary files or files that can't be read as UTF-8
-        };
-        
-        let hash = calculate_file_hash(&content);
-        let path_str = path.strip_prefix(canonical_folder_path)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
-        
-        // Check if file needs updating
-        if existing_files.get(&path_str).map_or(true, |h| h != &hash) {
-            files_to_index.push((path_str, content, hash));
-        }
-        
-        total_files += 1;
     }
     
-    if files_to_index.is_empty() {
+    // Handle deletions
+    for path in &paths_to_delete {
+        info!("Deleting chunks for removed file: {}", path);
+        store.delete_file_chunks(path).await?;
+    }
+    
+    if files_to_index.is_empty() && paths_to_delete.is_empty() {
         info!("No files need updating. Index is up to date.");
+        // Still save state to update the OID
+        let new_state = GromaState {
+            last_processed_oid: head_commit_oid.to_string(),
+        };
+        save_state(repo, &new_state)?;
         return Ok(());
     }
     
-    info!("Indexing {} files (out of {} total)...", files_to_index.len(), total_files);
+    info!("Processing {} files to index and {} files to delete", 
+         files_to_index.len(), paths_to_delete.len());
     
     // Process files and generate embeddings
     for (path, content, hash) in files_to_index {
@@ -501,6 +631,13 @@ async fn perform_file_updates(
     }
     
     info!("Indexing complete.");
+    
+    // Save the current state
+    let new_state = GromaState {
+        last_processed_oid: head_commit_oid.to_string(),
+    };
+    save_state(repo, &new_state)?;
+    
     Ok(())
 }
 

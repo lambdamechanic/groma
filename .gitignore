@@ -3,3 +3,4 @@ target
 .fastembed_cache
 lancedb_data
 .groma_lancedb
+.gromastate
