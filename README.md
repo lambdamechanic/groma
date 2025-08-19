@@ -35,7 +35,11 @@ cp target/release/groma-lancedb ~/.local/bin/
 
 ## Usage
 
-Both versions use the same command-line interface:
+Both versions can run in two modes: **CLI mode** (default) or **MCP server mode**.
+
+### CLI Mode (Default)
+
+Standard command-line interface for direct searching:
 
 ```bash
 # Basic usage - pipe your query through stdin
@@ -45,10 +49,43 @@ echo "authentication logic" | groma /path/to/repo --cutoff 0.3
 echo "authentication logic" | groma-lancedb /path/to/repo --cutoff 0.3
 ```
 
+### MCP Server Mode (New!)
+
+The LanceDB version (`groma-lancedb`) can also run as an [MCP (Model Context Protocol)](https://github.com/anthropics/mcp) server, allowing integration with AI assistants that support MCP:
+
+```bash
+# Start as MCP server (communicates via stdin/stdout)
+groma-lancedb --mcp-server
+```
+
+When running as an MCP server, `groma-lancedb` exposes a `find_code` tool that AI assistants can call with:
+- `query` (required): The search query
+- `folder` (required): Path to the Git repository to search
+- `cutoff` (optional): Similarity threshold (0.0-1.0, default: 0.7)
+- `suppress_updates` (optional): Skip indexing, use existing data (default: false)
+
+#### Using with Claude Desktop
+
+Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "groma": {
+      "command": "/path/to/groma-lancedb",
+      "args": ["--mcp-server"]
+    }
+  }
+}
+```
+
+Then Claude can search your code repositories semantically using natural language queries.
+
 ### Options
 - `--cutoff` - Similarity threshold (0.0-1.0, default: 0.7)
 - `--suppress-updates` - Skip indexing, query existing data only
 - `--debug` - Enable debug logging
+- `--mcp-server` - Run as MCP server instead of CLI tool (groma-lancedb only)
 
 ## Setup Requirements
 
@@ -123,6 +160,7 @@ aider --read $(groma-files "authentication logic" .)
 | Embedding Quality | Higher | Good |
 | Speed | Fast after indexing | Fast after indexing |
 | Storage | External (Qdrant) | Local (.groma_lancedb) |
+| MCP Server Mode | No | Yes |
 
 ## Why Groma?
 

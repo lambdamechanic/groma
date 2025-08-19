@@ -22,14 +22,25 @@ use ignore::gitignore::GitignoreBuilder;
 use uuid::Uuid;
 use futures::TryStreamExt;
 
+// MCP server imports
+use rmcp::{
+    ErrorData as McpError, 
+    model::*, 
+    ServerHandler,
+    service::{serve_server, RoleServer},
+};
+use tokio::sync::Mutex;
+
 const EMBEDDING_DIMENSION: usize = 384; // AllMiniLML6V2 dimension
 
 /// Command-line arguments - matches the original groma interface
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about = "Groma with LanceDB - uses LOCAL embeddings (fastembed), NOT OpenAI", long_about = None)]
 struct Args {
     /// Path to the folder within a Git repository to scan.
-    folder: PathBuf,
+    /// When in MCP server mode, this is optional and can be provided per-request
+    #[arg(required_unless_present = "mcp_server")]
+    folder: Option<PathBuf>,
 
     /// Relevance cutoff for results (e.g., 0.7). Only results with a score
     /// above this threshold will be shown.
@@ -48,6 +59,10 @@ struct Args {
     /// Enable debug logging.
     #[arg(long)]
     debug: bool,
+
+    /// Run as MCP server instead of CLI tool
+    #[arg(long)]
+    mcp_server: bool,
 }
 
 /// Stores the state between runs, specifically the last processed Git commit OID.
@@ -344,13 +359,17 @@ fn initialize_logging(debug: bool) {
         .expect("Failed to set global tracing subscriber");
 }
 
-async fn perform_file_updates(
-    _args: &Args,
+// Structure to hold file update information without git2 types
+struct FileUpdateInfo {
+    files_to_index: Vec<(PathBuf, String)>,
+    paths_to_delete: Vec<String>,
+    head_commit_oid: String,
+}
+
+fn gather_file_updates(
     repo: &Repository,
-    model: &mut TextEmbedding,
-    store: &LanceDBStore,
     canonical_folder_path: &Path,
-) -> Result<()> {
+) -> Result<FileUpdateInfo> {
     info!("Checking for file updates using Git diff...");
     
     let workdir = repo
@@ -483,8 +502,7 @@ async fn perform_file_updates(
                                 .unwrap_or(&full_path)
                                 .to_string_lossy()
                                 .to_string();
-                            let hash = calculate_file_hash(&content);
-                            files_to_index.push((path_str, content, hash));
+                            files_to_index.push((PathBuf::from(path_str), content));
                             processed_paths.insert(full_path);
                         }
                     }
@@ -521,8 +539,7 @@ async fn perform_file_updates(
                                     .unwrap_or(&full_path)
                                     .to_string_lossy()
                                     .to_string();
-                                let hash = calculate_file_hash(&content);
-                                files_to_index.push((path_str, content, hash));
+                                files_to_index.push((PathBuf::from(path_str), content));
                                 processed_paths.insert(full_path);
                             }
                         }
@@ -562,8 +579,7 @@ async fn perform_file_updates(
                                     .unwrap_or(&full_path)
                                     .to_string_lossy()
                                     .to_string();
-                                let hash = calculate_file_hash(&content);
-                                files_to_index.push((path_str, content, hash));
+                                files_to_index.push((PathBuf::from(path_str), content));
                                 processed_paths.insert(full_path);
                             }
                         }
@@ -574,34 +590,71 @@ async fn perform_file_updates(
         }
     }
     
+    Ok(FileUpdateInfo {
+        files_to_index,
+        paths_to_delete,
+        head_commit_oid: head_commit_oid.to_string(),
+    })
+}
+
+async fn perform_file_updates(
+    _args: &Args,
+    repo: &Repository,
+    model: &mut TextEmbedding,
+    store: &LanceDBStore,
+    canonical_folder_path: &Path,
+) -> Result<()> {
+    // Gather all git information synchronously
+    let update_info = gather_file_updates(repo, canonical_folder_path)?;
+    
     // Handle deletions
-    for path in &paths_to_delete {
+    for path in &update_info.paths_to_delete {
         info!("Deleting chunks for removed file: {}", path);
         store.delete_file_chunks(path).await?;
     }
     
-    if files_to_index.is_empty() && paths_to_delete.is_empty() {
+    if update_info.files_to_index.is_empty() && update_info.paths_to_delete.is_empty() {
         info!("No files need updating. Index is up to date.");
         // Still save state to update the OID
         let new_state = GromaState {
-            last_processed_oid: head_commit_oid.to_string(),
+            last_processed_oid: update_info.head_commit_oid.clone(),
         };
         save_state(repo, &new_state)?;
         return Ok(());
     }
     
     info!("Processing {} files to index and {} files to delete", 
-         files_to_index.len(), paths_to_delete.len());
+         update_info.files_to_index.len(), update_info.paths_to_delete.len());
     
-    // Process files and generate embeddings
-    for (path, content, hash) in files_to_index {
-        debug!("Processing file: {}", path);
+    // Process files and save chunks to database
+    process_files_to_index(&update_info.files_to_index, model, store).await?;
+    
+    // Save state
+    let new_state = GromaState {
+        last_processed_oid: update_info.head_commit_oid,
+    };
+    save_state(repo, &new_state)?;
+    
+    Ok(())
+}
+
+async fn process_files_to_index(
+    files_to_index: &[(PathBuf, String)],
+    model: &mut TextEmbedding,
+    store: &LanceDBStore,
+) -> Result<()> {
+    for (path, content) in files_to_index {
+        let path_str = path.to_string_lossy();
+        debug!("Processing file: {}", path_str);
         
         // Delete existing chunks for this file
-        store.delete_file_chunks(&path).await?;
+        store.delete_file_chunks(&path_str).await?;
+        
+        // Calculate hash for the file
+        let hash = calculate_file_hash(content);
         
         // Chunk the content
-        let chunks = chunk_text(&content, 50, 10); // Chunk by lines for simplicity
+        let chunks = chunk_text(content, 50, 10); // Chunk by lines for simplicity
         if chunks.is_empty() {
             continue;
         }
@@ -613,13 +666,13 @@ async fn perform_file_updates(
         let mut chunk_data = Vec::new();
         for (i, (_chunk_text, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
             let id = format!("{}#{}", 
-                Uuid::new_v5(&Uuid::NAMESPACE_OID, path.as_bytes()),
+                Uuid::new_v5(&Uuid::NAMESPACE_OID, path_str.as_bytes()),
                 i
             );
             
             chunk_data.push(ChunkData {
                 id,
-                path: path.clone(),
+                path: path_str.to_string(),
                 hash: hash.clone(),
                 chunk_index: i as i32,
                 vector: normalize_vector(embedding.to_vec()),
@@ -629,14 +682,6 @@ async fn perform_file_updates(
         // Upsert to LanceDB
         store.upsert_chunks(chunk_data).await?;
     }
-    
-    info!("Indexing complete.");
-    
-    // Save the current state
-    let new_state = GromaState {
-        last_processed_oid: head_commit_oid.to_string(),
-    };
-    save_state(repo, &new_state)?;
     
     Ok(())
 }
@@ -690,12 +735,252 @@ async fn process_query(
     Ok(())
 }
 
+// MCP Server implementation
+#[derive(Clone)]
+struct GromaMcpServer {
+    args: Args,
+    model: Arc<Mutex<TextEmbedding>>,
+}
+
+impl GromaMcpServer {
+    fn new(args: Args, model: Arc<Mutex<TextEmbedding>>) -> Self {
+        Self {
+            args,
+            model,
+        }
+    }
+
+    async fn find_code_impl(
+        &self,
+        query: String,
+        folder: String,
+        cutoff: Option<f32>,
+        suppress_updates: Option<bool>,
+    ) -> Result<CallToolResult, McpError> {
+        let cutoff = cutoff.unwrap_or(0.7);
+        let suppress_updates = suppress_updates.unwrap_or(false);
+        
+        // Execute the search
+        let folder_path = PathBuf::from(&folder);
+        let canonical_folder_path = fs::canonicalize(&folder_path)
+            .map_err(|e| McpError::new(ErrorCode::INTERNAL_ERROR, format!("Failed to canonicalize path: {}", e), None))?;
+        
+        // Initialize LanceDB
+        let store = LanceDBStore::new(&self.args.lancedb_path, EMBEDDING_DIMENSION).await
+            .map_err(|e| McpError::new(ErrorCode::INTERNAL_ERROR, format!("Failed to initialize LanceDB: {}", e), None))?;
+        
+        // Get a mutable reference to the model
+        let mut model = self.model.lock().await;
+        
+        // Perform file updates unless suppressed
+        if !suppress_updates {
+            // Gather file updates synchronously (handles all git operations)
+            let update_info = {
+                let repo = Repository::discover(&canonical_folder_path)
+                    .map_err(|e| McpError::new(ErrorCode::INTERNAL_ERROR, format!("Failed to find Git repository: {}", e), None))?;
+                
+                gather_file_updates(&repo, &canonical_folder_path)
+                    .map_err(|e| McpError::new(ErrorCode::INTERNAL_ERROR, format!("Failed to gather updates: {}", e), None))?
+            };
+            
+            // Now process async operations without holding repo
+            for path in &update_info.paths_to_delete {
+                store.delete_file_chunks(path).await
+                    .map_err(|e| McpError::new(ErrorCode::INTERNAL_ERROR, format!("Failed to delete chunks: {}", e), None))?;
+            }
+            
+            if !update_info.files_to_index.is_empty() {
+                process_files_to_index(&update_info.files_to_index, &mut model, &store).await
+                    .map_err(|e| McpError::new(ErrorCode::INTERNAL_ERROR, format!("Failed to process files: {}", e), None))?;
+            }
+            
+            // Save state after processing
+            {
+                let repo = Repository::discover(&canonical_folder_path)
+                    .map_err(|e| McpError::new(ErrorCode::INTERNAL_ERROR, format!("Failed to find Git repository: {}", e), None))?;
+                let new_state = GromaState {
+                    last_processed_oid: update_info.head_commit_oid,
+                };
+                save_state(&repo, &new_state)
+                    .map_err(|e| McpError::new(ErrorCode::INTERNAL_ERROR, format!("Failed to save state: {}", e), None))?;
+            }
+        }
+        
+        // Generate embedding for query
+        let query_embedding = model.embed(vec![query.clone()], None)
+            .map_err(|e| McpError::new(ErrorCode::INTERNAL_ERROR, format!("Failed to generate embedding: {}", e), None))?;
+        let query_vector = query_embedding[0].to_vec();
+        
+        // Search in LanceDB
+        let results = store.search(query_vector, 100).await
+            .map_err(|e| McpError::new(ErrorCode::INTERNAL_ERROR, format!("Search failed: {}", e), None))?;
+        
+        // Convert distance to similarity score and filter by cutoff
+        let mut files_by_relevance: HashMap<String, f32> = HashMap::new();
+        
+        for result in results {
+            // Convert L2 distance to similarity score
+            let similarity = 1.0 / (1.0 + result.distance);
+            
+            if similarity >= cutoff {
+                files_by_relevance
+                    .entry(result.path.clone())
+                    .and_modify(|s| *s = s.max(similarity))
+                    .or_insert(similarity);
+            }
+        }
+        
+        // Sort by relevance
+        let mut sorted_files: Vec<_> = files_by_relevance.into_iter().collect();
+        sorted_files.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        
+        // Format as JSON output
+        let result = serde_json::json!({
+            "files_by_relevance": sorted_files.into_iter()
+                .map(|(path, score)| vec![
+                    serde_json::Value::from(score),
+                    serde_json::Value::from(path)
+                ])
+                .collect::<Vec<_>>()
+        });
+        
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+        )]))
+    }
+}
+
+impl ServerHandler for GromaMcpServer {
+    fn list_tools(
+        &self,
+        _pagination: Option<PaginatedRequestParam>,
+        _ctx: rmcp::service::RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
+        async move {
+            let input_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural language query describing what code to search for"
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Path to the folder within a Git repository to scan"
+                    },
+                    "cutoff": {
+                        "type": "number",
+                        "description": "Relevance cutoff for results (0.0-1.0). Default: 0.7",
+                        "default": 0.7
+                    },
+                    "suppress_updates": {
+                        "type": "boolean",
+                        "description": "Skip indexing updates, query existing data only",
+                        "default": false
+                    }
+                },
+                "required": ["query", "folder"]
+            });
+            
+            let tools = vec![
+                Tool {
+                    name: "find_code".into(),
+                    description: Some("Search for relevant code files based on semantic similarity".into()),
+                    input_schema: Arc::new(input_schema.as_object().unwrap().clone()),
+                    output_schema: None,
+                    annotations: None,
+                }
+            ];
+            Ok(ListToolsResult { 
+                tools,
+                next_cursor: None,
+            })
+        }
+    }
+
+    fn call_tool(
+        &self, 
+        params: CallToolRequestParam,
+        _ctx: rmcp::service::RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
+        async move {
+            if params.name != "find_code" {
+                return Err(McpError::new(
+                    ErrorCode::METHOD_NOT_FOUND,
+                    format!("Tool '{}' not found", params.name),
+                    None
+                ));
+            }
+
+            // Parse arguments
+            let args = params.arguments.unwrap_or_default();
+            
+            let query = args.get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "query is required".to_string(),
+                    None
+                ))?
+                .to_string();
+            
+            let folder = args.get("folder")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "folder is required".to_string(),
+                    None
+                ))?
+                .to_string();
+            
+            let cutoff = args.get("cutoff")
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32);
+            
+            let suppress_updates = args.get("suppress_updates")
+                .and_then(|v| v.as_bool());
+
+            self.find_code_impl(query, folder, cutoff, suppress_updates).await
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     initialize_logging(args.debug);
     
+    if args.mcp_server {
+        info!("Starting Groma as MCP server...");
+        
+        // Initialize the LOCAL embedding model
+        info!("Initializing LOCAL embedding model (AllMiniLML6V2)...");
+        let model = TextEmbedding::try_new(
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                .with_show_download_progress(false)
+        )?;
+        let model = Arc::new(Mutex::new(model));
+        info!("LOCAL embedding model initialized (no API calls required).");
+        
+        // Create the MCP server instance
+        let server = GromaMcpServer::new(args.clone(), model);
+        
+        // Run the MCP server
+        info!("MCP server listening on stdio...");
+        use rmcp::transport::IntoTransport;
+        let transport = (tokio::io::stdin(), tokio::io::stdout()).into_transport();
+        serve_server(server, transport).await
+            .map_err(|e| anyhow!("MCP server error: {}", e))?;
+        
+        return Ok(());
+    }
+    
+    // Normal CLI mode
     info!("Starting Groma with LanceDB (using LOCAL fastembed, NOT OpenAI)...");
+    
+    // Folder is required in CLI mode
+    let folder = args.folder.as_ref()
+        .ok_or_else(|| anyhow!("Folder path is required in CLI mode"))?;
     
     // Initialize the LOCAL embedding model
     info!("Initializing LOCAL embedding model (AllMiniLML6V2)...");
@@ -706,7 +991,7 @@ async fn main() -> Result<()> {
     info!("LOCAL embedding model initialized (no API calls required).");
     
     // Canonicalize folder path
-    let canonical_folder_path = fs::canonicalize(&args.folder)?;
+    let canonical_folder_path = fs::canonicalize(folder)?;
     info!("Using folder: {}", canonical_folder_path.display());
     
     // Find Git repository
