@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use arrow_array::{ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray, Int32Array, types::Float32Type};
 use arrow_schema::{DataType, Field, Schema};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use fastembed::{TextEmbedding, EmbeddingModel, InitOptions};
 use git2::{Repository, DiffOptions, Oid};
 use lancedb::query::{ExecutableQuery, QueryBase};
@@ -16,20 +16,40 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, error};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use ignore::gitignore::GitignoreBuilder;
 use uuid::Uuid;
 use futures::TryStreamExt;
 
-const EMBEDDING_DIMENSION: usize = 384; // AllMiniLML6V2 dimension
+// MCP server imports
+use mcp_core::{
+    content::Content,
+    handler::{PromptError, ResourceError, ToolError},
+    protocol::ServerCapabilities,
+    resource::Resource,
+    tool::{Tool, ToolAnnotations},
+};
+use mcp_server::{
+    router::{CapabilitiesBuilder, RouterService},
+    ByteTransport, Router, Server,
+};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Mutex,
+};
+use once_cell::sync::Lazy;
+use tokio::io::{stdin as async_stdin, stdout as async_stdout};
+
+pub const EMBEDDING_DIMENSION: usize = 384; // AllMiniLML6V2 dimension
 
 /// Command-line arguments - matches the original groma interface
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Groma with LanceDB - uses LOCAL embeddings (fastembed), NOT OpenAI", long_about = None)]
 struct Args {
     /// Path to the folder within a Git repository to scan.
-    folder: PathBuf,
+    folder: Option<PathBuf>,
 
     /// Relevance cutoff for results (e.g., 0.7). Only results with a score
     /// above this threshold will be shown.
@@ -48,6 +68,20 @@ struct Args {
     /// Enable debug logging.
     #[arg(long)]
     debug: bool,
+    
+    /// Subcommands
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    #[command(about = "Run as an MCP server using stdio for communication")]
+    Mcp {
+        /// Enable debug logging
+        #[arg(long)]
+        debug: bool,
+    },
 }
 
 /// Stores the state between runs, specifically the last processed Git commit OID.
@@ -288,7 +322,7 @@ struct SearchResult {
     distance: f32,
 }
 
-fn normalize_vector(vector: Vec<f32>) -> Vec<f32> {
+pub fn normalize_vector(vector: Vec<f32>) -> Vec<f32> {
     let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
         vector.iter().map(|x| x / norm).collect()
@@ -693,55 +727,402 @@ async fn process_query(
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    initialize_logging(args.debug);
     
-    info!("Starting Groma with LanceDB (using LOCAL fastembed, NOT OpenAI)...");
+    // Check if we're running in MCP mode
+    match &args.command {
+        Some(Commands::Mcp { debug }) => {
+            initialize_logging(*debug);
+            info!("Starting Groma LanceDB in MCP server mode...");
+            return run_lancedb_mcp_server().await;
+        }
+        None => {
+            // Standard CLI mode
+            initialize_logging(args.debug);
+            
+            let folder = args.folder.as_ref().ok_or_else(|| 
+                anyhow!("Folder argument is required when not using MCP mode"))?;
+            
+            info!("Starting Groma with LanceDB (using LOCAL fastembed, NOT OpenAI)...");
+            
+            // Initialize the LOCAL embedding model
+            info!("Initializing LOCAL embedding model (AllMiniLML6V2)...");
+            let mut model = TextEmbedding::try_new(
+                InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                    .with_show_download_progress(false)
+            )?;
+            info!("LOCAL embedding model initialized (no API calls required).");
+            
+            // Canonicalize folder path
+            let canonical_folder_path = fs::canonicalize(&folder)?;
+            info!("Using folder: {}", canonical_folder_path.display());
+            
+            // Find Git repository
+            let repo = Repository::discover(&canonical_folder_path)
+                .context("Failed to find Git repository")?;
+            
+            // Initialize LanceDB
+            info!("Initializing LanceDB at: {}", args.lancedb_path);
+            let store = LanceDBStore::new(&args.lancedb_path, EMBEDDING_DIMENSION).await?;
+            
+            // Perform file updates unless suppressed
+            if !args.suppress_updates {
+                perform_file_updates(
+                    &args,
+                    &repo,
+                    &mut model,
+                    &store,
+                    &canonical_folder_path,
+                ).await?;
+            } else {
+                info!("Skipping file updates (--suppress-updates specified).");
+            }
+            
+            // Read query from stdin
+            info!("Reading query from stdin...");
+            let mut query = String::new();
+            io::stdin().read_to_string(&mut query)?;
+            let query = query.trim();
+            
+            if query.is_empty() {
+                return Err(anyhow!("No query provided via stdin"));
+            }
+            
+            info!("Processing query: {}", query);
+            process_query(query, &mut model, &store, args.cutoff).await?;
+            
+            Ok(())
+        }
+    }
+}
+
+/// Generate a collection name from a folder path for LanceDB
+pub fn get_collection_name(_folder_path: &Path) -> String {
+    // Use a fixed table name for simplicity, could be enhanced to use path-based names
+    "code_chunks".to_string()
+}
+
+// ====== MCP Server Implementation ======
+
+// Simple set to track which folders are currently being indexed
+static INDEXING_FOLDERS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// A router that wraps our LanceDB-based Groma functionality to expose it via MCP
+#[derive(Clone)]
+pub struct GromaLanceDBRouter {}
+
+impl GromaLanceDBRouter {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    /// Process a query and return the results using LanceDB backend
+    async fn process_mcp_query(&self, query: String, folder: String, cutoff: f32) -> Result<String, ToolError> {
+        // Check if this folder is already being indexed
+        let is_indexing = {
+            let indexing_folders = INDEXING_FOLDERS.lock().unwrap();
+            indexing_folders.contains(&folder)
+        };
+        
+        // If we're already indexing, return a message
+        if is_indexing {
+            let json_output = serde_json::json!({
+                "status": "indexing",
+                "message": format!("The codebase '{}' is currently being indexed. Please check back in a few minutes.", folder),
+                "files_by_relevance": []
+            });
+            
+            return serde_json::to_string_pretty(&json_output)
+                .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize message: {}", e)));
+        }
+        
+        // Initialize the embedding model
+        let mut model = TextEmbedding::try_new(
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false),
+        ).map_err(|e| ToolError::ExecutionError(format!("Failed to initialize embedding model: {}", e)))?;
+        
+        // Prepare paths
+        let folder_path = PathBuf::from(&folder);
+        let canonical_folder_path = folder_path.canonicalize()
+            .map_err(|_| {
+                let json_output = serde_json::json!({
+                    "status": "error",
+                    "message": format!("The folder '{}' does not exist or is not accessible.", folder),
+                    "files_by_relevance": []
+                });
+                ToolError::ExecutionError(format!("Folder not found: {}", folder))
+            })?;
+        
+        // Connect to LanceDB
+        let lancedb_path = ".groma_lancedb";
+        let db = lancedb::connect(lancedb_path).execute().await
+            .map_err(|e| ToolError::ExecutionError(format!("Failed to connect to LanceDB: {}", e)))?;
+        
+        // Check if the table exists
+        let table_names = db.table_names().execute().await
+            .map_err(|e| ToolError::ExecutionError(format!("Failed to list tables: {}", e)))?;
+        let table_exists = table_names.contains(&"code_chunks".to_string());
+        
+        // If table doesn't exist, start indexing
+        if !table_exists {
+            // Start indexing in the background
+            start_background_indexing(&folder).await;
+            
+            // Return a message that indexing has started
+            let json_output = serde_json::json!({
+                "status": "indexing_started",
+                "message": format!("Started indexing codebase '{}'. Please check back in a few minutes.", folder),
+                "files_by_relevance": []
+            });
+            
+            return serde_json::to_string_pretty(&json_output)
+                .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize message: {}", e)));
+        }
+        
+        // Initialize LanceDB Store
+        let store = LanceDBStore::new(lancedb_path, EMBEDDING_DIMENSION).await
+            .map_err(|e| ToolError::ExecutionError(format!("Failed to initialize LanceDB store: {}", e)))?;
+        
+        // Generate embedding for the query
+        let query_embedding = model.embed(vec![query.clone()], None)
+            .map_err(|e| ToolError::ExecutionError(format!("Failed to embed query: {}", e)))?;
+        
+        if query_embedding.is_empty() || query_embedding[0].is_empty() {
+            return Err(ToolError::ExecutionError("Failed to generate query embedding".to_string()));
+        }
+        
+        // Search using our existing logic
+        let query_vector = query_embedding[0].to_vec();
+        let results = store.search(query_vector, 100).await
+            .map_err(|e| ToolError::ExecutionError(format!("Failed to execute search: {}", e)))?;
+        
+        // Process results (reuse existing logic)
+        let mut files_by_relevance: HashMap<String, f32> = HashMap::new();
+        
+        for result in results {
+            // Convert L2 distance to similarity score
+            let similarity = 1.0 / (1.0 + result.distance);
+            
+            if similarity >= cutoff {
+                // Make path relative to the query folder
+                let relative_path = if result.path.starts_with(canonical_folder_path.to_str().unwrap_or("")) {
+                    result.path.strip_prefix(canonical_folder_path.to_str().unwrap_or(""))
+                        .unwrap_or(&result.path)
+                        .trim_start_matches('/')
+                } else {
+                    &result.path
+                };
+                
+                files_by_relevance
+                    .entry(relative_path.to_string())
+                    .and_modify(|s| *s = s.max(similarity))
+                    .or_insert(similarity);
+            }
+        }
+        
+        // Sort by relevance
+        let mut sorted_files: Vec<_> = files_by_relevance.into_iter().collect();
+        sorted_files.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        
+        // Create the final output
+        let json_output = serde_json::json!({
+            "query": query,
+            "cutoff": cutoff,
+            "files_by_relevance": sorted_files.into_iter()
+                .map(|(file, relevance)| serde_json::json!({
+                    "file": file,
+                    "relevance": relevance
+                }))
+                .collect::<Vec<_>>()
+        });
+        
+        serde_json::to_string_pretty(&json_output)
+            .map_err(|e| ToolError::ExecutionError(format!("Failed to serialize results: {}", e)))
+    }
+}
+
+/// Helper function to start indexing a folder in the background
+async fn start_background_indexing(folder: &str) {
+    use tokio::task;
+    use tokio::process::Command;
     
-    // Initialize the LOCAL embedding model
-    info!("Initializing LOCAL embedding model (AllMiniLML6V2)...");
-    let mut model = TextEmbedding::try_new(
-        InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-            .with_show_download_progress(false)
-    )?;
-    info!("LOCAL embedding model initialized (no API calls required).");
+    info!("Starting indexing for {}...", folder);
     
-    // Canonicalize folder path
-    let canonical_folder_path = fs::canonicalize(&args.folder)?;
-    info!("Using folder: {}", canonical_folder_path.display());
-    
-    // Find Git repository
-    let repo = Repository::discover(&canonical_folder_path)
-        .context("Failed to find Git repository")?;
-    
-    // Initialize LanceDB
-    info!("Initializing LanceDB at: {}", args.lancedb_path);
-    let store = LanceDBStore::new(&args.lancedb_path, EMBEDDING_DIMENSION).await?;
-    
-    // Perform file updates unless suppressed
-    if !args.suppress_updates {
-        perform_file_updates(
-            &args,
-            &repo,
-            &mut model,
-            &store,
-            &canonical_folder_path,
-        ).await?;
-    } else {
-        info!("Skipping file updates (--suppress-updates specified).");
+    // Mark this folder as being indexed
+    {
+        let mut indexing_folders = INDEXING_FOLDERS.lock().unwrap();
+        indexing_folders.insert(folder.to_string());
     }
     
-    // Read query from stdin
-    info!("Reading query from stdin...");
-    let mut query = String::new();
-    io::stdin().read_to_string(&mut query)?;
-    let query = query.trim();
+    // Clone what we need for the background task
+    let folder_clone = folder.to_string();
     
-    if query.is_empty() {
-        return Err(anyhow!("No query provided via stdin"));
+    // Get the path to groma-lancedb executable
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("groma-lancedb"));
+    
+    // Spawn a background process to run the indexing
+    task::spawn(async move {
+        info!("Running indexing process for {}", folder_clone);
+        
+        // Run the CLI as a separate process
+        let status = Command::new(current_exe)
+            .arg(&folder_clone)
+            .status()
+            .await;
+        
+        if let Err(e) = &status {
+            error!("Failed to start indexing for {}: {}", folder_clone, e);
+        } else if let Ok(exit_status) = status {
+            if exit_status.success() {
+                info!("Indexing completed successfully for {}", folder_clone);
+            } else {
+                error!("Indexing failed for {}: {:?}", folder_clone, exit_status);
+            }
+        }
+        
+        // Remove from indexing folders
+        let mut indexing_folders = INDEXING_FOLDERS.lock().unwrap();
+        indexing_folders.remove(&folder_clone);
+    });
+}
+
+impl Router for GromaLanceDBRouter {
+    fn name(&self) -> String {
+        "groma-lancedb".to_string()
     }
-    
-    info!("Processing query: {}", query);
-    process_query(query, &mut model, &store, args.cutoff).await?;
-    
+
+    fn instructions(&self) -> String {
+        "Use this for finding semantically similar files in a given repository using LanceDB backend. \
+        The results will be returned as a JSON object with relevant files listed. \
+        This version uses local embeddings (fastembed) instead of OpenAI. \
+        It is highly recommended to use this along with rg for searching".to_string()
+    }
+
+    fn capabilities(&self) -> ServerCapabilities {
+        CapabilitiesBuilder::new()
+            .with_tools(false)  // We don't need tool change notifications
+            .with_resources(false, false)  // We don't need resource capabilities
+            .with_prompts(false)  // We don't need prompt capabilities
+            .build()
+    }
+
+    fn list_tools(&self) -> Vec<Tool> {
+        vec![
+            Tool::new(
+                "query".to_string(),
+                "pass in search terms to find related files that are similar in concept".to_string(),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "what to search for, terms, concepts, snippets etc"
+                        },
+                        "folder": {
+                            "type": "string",
+                            "description": "The path to the repository to search"
+                        },
+                        "cutoff": {
+                            "type": "number",
+                            "description": "Relevance cutoff (0.0-1.0)",
+                            "default": 0.3
+                        }
+                    },
+                    "required": ["query", "folder"]
+                }),
+                Some(ToolAnnotations {
+                    title: Some("Search Repository".to_string()),
+                    read_only_hint: true,
+                    destructive_hint: false,
+                    idempotent_hint: true,
+                    open_world_hint: false,
+                }),
+            ),
+        ]
+    }
+
+    fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Content>, ToolError>> + Send + 'static>> {
+        let this = self.clone();
+        let tool_name = tool_name.to_string();
+        let arguments = arguments.clone();
+
+        Box::pin(async move {
+            match tool_name.as_str() {
+                "query" => {
+                    // Extract arguments
+                    let query = arguments
+                        .get("query")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| ToolError::InvalidParameters("Missing 'query' argument".to_string()))?
+                        .to_string();
+                    
+                    let folder = arguments
+                        .get("folder")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| ToolError::InvalidParameters("Missing 'folder' argument".to_string()))?
+                        .to_string();
+                    
+                    let cutoff = arguments
+                        .get("cutoff")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.3) as f32;
+                    
+                    // Process the query and return results directly
+                    let result = this.process_mcp_query(query, folder, cutoff).await?;
+                    
+                    // Return the result as text content
+                    Ok(vec![Content::text(result)])
+                },
+                _ => Err(ToolError::NotFound(format!("Tool {} not found", tool_name))),
+            }
+        })
+    }
+
+    // Implement the required resource methods with empty implementations
+    fn list_resources(&self) -> Vec<Resource> {
+        vec![]
+    }
+
+    fn read_resource(
+        &self,
+        _uri: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ResourceError>> + Send + 'static>> {
+        Box::pin(async {
+            Err(ResourceError::NotFound("Resources not supported".to_string()))
+        })
+    }
+
+    // Implement required prompt methods with empty implementations
+    fn list_prompts(&self) -> Vec<mcp_core::prompt::Prompt> {
+        vec![]
+    }
+
+    fn get_prompt(
+        &self,
+        _prompt_name: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, PromptError>> + Send + 'static>> {
+        Box::pin(async {
+            Err(PromptError::NotFound("Prompts not supported".to_string()))
+        })
+    }
+}
+
+/// Run the MCP server with our LanceDB-based Groma router
+pub async fn run_lancedb_mcp_server() -> Result<()> {
+    tracing::info!("Starting Groma LanceDB MCP server");
+
+    // Create an instance of our router
+    let router = RouterService(GromaLanceDBRouter::new());
+
+    // Create and run the server
+    let server = Server::new(router);
+    let transport = ByteTransport::new(async_stdin(), async_stdout());
+
+    tracing::info!("LanceDB MCP server initialized and ready to handle requests");
+    server.run(transport).await?;
+
     Ok(())
 }
