@@ -732,7 +732,7 @@ async fn main() -> Result<()> {
     match &args.command {
         Some(Commands::Mcp { debug }) => {
             initialize_logging(*debug);
-            info!("Starting Groma LanceDB in MCP server mode...");
+            debug!("Starting Groma LanceDB in MCP server mode...");
             return run_lancedb_mcp_server().await;
         }
         None => {
@@ -795,11 +795,6 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Generate a collection name from a folder path for LanceDB
-pub fn get_collection_name(_folder_path: &Path) -> String {
-    // Use a fixed table name for simplicity, could be enhanced to use path-based names
-    "code_chunks".to_string()
-}
 
 // ====== MCP Server Implementation ======
 
@@ -844,11 +839,6 @@ impl GromaLanceDBRouter {
         let folder_path = PathBuf::from(&folder);
         let canonical_folder_path = folder_path.canonicalize()
             .map_err(|_| {
-                let json_output = serde_json::json!({
-                    "status": "error",
-                    "message": format!("The folder '{}' does not exist or is not accessible.", folder),
-                    "files_by_relevance": []
-                });
                 ToolError::ExecutionError(format!("Folder not found: {}", folder))
             })?;
         
@@ -1112,7 +1102,7 @@ impl Router for GromaLanceDBRouter {
 
 /// Run the MCP server with our LanceDB-based Groma router
 pub async fn run_lancedb_mcp_server() -> Result<()> {
-    tracing::info!("Starting Groma LanceDB MCP server");
+    debug!("Starting Groma LanceDB MCP server");
 
     // Create an instance of our router
     let router = RouterService(GromaLanceDBRouter::new());
@@ -1121,7 +1111,7 @@ pub async fn run_lancedb_mcp_server() -> Result<()> {
     let server = Server::new(router);
     let transport = ByteTransport::new(async_stdin(), async_stdout());
 
-    tracing::info!("LanceDB MCP server initialized and ready to handle requests");
+    debug!("LanceDB MCP server initialized and ready to handle requests");
     server.run(transport).await?;
 
     Ok(())
