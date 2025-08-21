@@ -530,6 +530,14 @@ async fn perform_file_updates(
                     // Only process files, not directories
                     if entry.kind() == Some(git2::ObjectType::Blob) {
                         if should_process_file(&full_path) {
+                            // Check file size (skip files > 1MB)
+                            if let Ok(metadata) = fs::metadata(&full_path) {
+                                if metadata.len() > 1_000_000 {
+                                    debug!("Skipping large file (>1MB): {}", full_path.display());
+                                    return git2::TreeWalkResult::Ok;
+                                }
+                            }
+                            
                             // Read file content
                             if let Ok(content) = fs::read_to_string(&full_path) {
                                 let path_str = full_path.strip_prefix(canonical_folder_path)
@@ -568,6 +576,14 @@ async fn perform_file_updates(
                             }
                             
                             if should_process_file(&full_path) && !processed_paths.contains(&full_path) {
+                                // Check file size (skip files > 1MB)
+                                if let Ok(metadata) = fs::metadata(&full_path) {
+                                    if metadata.len() > 1_000_000 {
+                                        debug!("Skipping large file (>1MB): {}", full_path.display());
+                                        continue;
+                                    }
+                                }
+                                
                                 // Read file content
                                 if let Ok(content) = fs::read_to_string(&full_path) {
                                     let path_str = full_path.strip_prefix(canonical_folder_path)
@@ -610,6 +626,14 @@ async fn perform_file_updates(
                             if full_path.starts_with(canonical_folder_path) && 
                                should_process_file(&full_path) && 
                                !processed_paths.contains(&full_path) {
+                                // Check file size (skip files > 1MB)
+                                if let Ok(metadata) = fs::metadata(&full_path) {
+                                    if metadata.len() > 1_000_000 {
+                                        debug!("Skipping large file (>1MB): {}", full_path.display());
+                                        continue;
+                                    }
+                                }
+                                
                                 if let Ok(content) = fs::read_to_string(&full_path) {
                                     let path_str = full_path.strip_prefix(canonical_folder_path)
                                         .unwrap_or(&full_path)
