@@ -48,7 +48,9 @@ url = "2.5" # For parsing Qdrant URL
 text-splitter = { version = "0.4.5", features = ["tiktoken-rs"] } # For chunking text by tokens (Specify patch)
 tiktoken-rs = "0.5" # Required by text_splitter feature
 ignore = "0.4" # For filtering output using .gromaignore
+chrono = "0.4" # For timestamp formatting in logs
 async-trait = "0.1" # For async trait implementations
+dirs = "5.0" # For getting home directory path
 
 # MCP Server dependencies - always included
 mcp-core = { path = "src/mcp-sdk/mcp-core" }

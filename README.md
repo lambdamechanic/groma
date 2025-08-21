@@ -73,6 +73,38 @@ export QDRANT_URL='http://your-qdrant-host:6334'
 
 **No setup required!** Just run it. The first run will download the embedding model (~80MB) automatically.
 
+## MCP Server Mode (LanceDB only)
+
+`groma-lancedb` can run as an MCP (Model Context Protocol) server:
+
+```bash
+# Run as MCP server
+groma-lancedb mcp
+
+# With debug logging (logs to /tmp/groma.log)
+groma-lancedb mcp --debug
+```
+
+### MCP Configuration
+
+Add to your MCP client config (e.g., Claude Desktop):
+
+```json
+{
+  "mcpServers": {
+    "groma": {
+      "command": "/path/to/groma-lancedb",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The MCP server provides a `query` tool for semantic code search:
+- **query**: Search query string
+- **folder**: Repository path to search
+- **cutoff**: Similarity threshold (0.0-1.0, default 0.3)
+
 ## How It Works
 
 1. **Indexing**: On first run, Groma scans your Git repository and creates embeddings for all tracked files
