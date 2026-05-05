@@ -69,8 +69,6 @@ export OPENAI_API_KEY='your-api-key-here'
 export QDRANT_URL='http://your-qdrant-host:6334'
 ```
 
-### For `groma-lancedb` (Local version)
-
 **No setup required!** Just run it. The first run will download the embedding model (~80MB) automatically.
 
 ## MCP Server Mode (LanceDB only)
